@@ -1,0 +1,2065 @@
+"""Application principale Dorking — Interface CustomTkinter."""
+
+import json
+import os
+import sys
+import threading
+import tkinter as tk
+import uuid
+import webbrowser
+from datetime import datetime
+from tkinter import filedialog, messagebox, ttk
+
+import customtkinter as ctk
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from core.config_manager import AppConfig, load_config, save_config
+from core.dork_builder import DorkBuilder, DorkQuery, validate_dork, from_template
+from core.dork_suggest import generate_dorks_from_company, get_stack_dorks
+from core.exporter import export_json, export_csv, export_pdf
+from core.search_engine import MultiEngine, SearchResult, SearchJob, url_builder, open_in_browser
+from core.smart_redirector import open_smart_redirector, save_smart_redirector
+from core.watchdog import WatchdogJob, WatchdogManager
+
+COLORS = {
+    "bg_dark": "#0D0D0D",
+    "bg_panel": "#141414",
+    "bg_card": "#1A1A2E",
+    "bg_input": "#1E1E2E",
+    "accent": "#00D4FF",
+    "accent2": "#FF6B35",
+    "accent3": "#A855F7",
+    "success": "#00FF88",
+    "warning": "#FFD700",
+    "danger": "#FF4444",
+    "text": "#E0E0E0",
+    "text_dim": "#888888",
+    "border": "#2A2A4A",
+}
+
+SEVERITY_COLORS = {
+    "CRITIQUE": "#FF4444",
+    "ÉLEVÉ": "#FF6B35",
+    "MOYEN": "#FFD700",
+    "INFO": "#00D4FF",
+}
+
+OPERATORS = [
+    ("site:", "Domaine cible"),
+    ("filetype:", "Type de fichier"),
+    ("intitle:", "Titre de la page"),
+    ("inurl:", "Dans l'URL"),
+    ("intext:", "Dans le contenu"),
+    ("inurl:", "Dans l'URL"),
+    ("cache:", "Version en cache"),
+    ("related:", "Sites similaires"),
+    ("AROUND(N)", "Proximité de mots"),
+    ('"phrase"', "Phrase exacte"),
+    ("-mot", "Exclure un mot"),
+    ("OR", "Opérateur OU"),
+]
+
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+DORK_LIB_PATH = os.path.join(DATA_DIR, "dork_library.json")
+
+
+class DorkingApp(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("dark-blue")
+
+        self.config = load_config()
+        self.dork_library = self._load_dork_library()
+        self.engine = None
+        self.search_results: dict[str, list[SearchResult]] = {}
+        self.watchdog: WatchdogManager | None = None
+        self._build_engine()
+
+        self.title("Dorking Tool — OSINT & Security Research")
+        self.geometry("1400x900")
+        self.minsize(1100, 700)
+        self.configure(fg_color=COLORS["bg_dark"])
+
+        self._build_ui()
+        self._init_watchdog()
+
+    def _load_dork_library(self) -> dict:
+        if os.path.exists(DORK_LIB_PATH):
+            with open(DORK_LIB_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        return {"categories": {}, "operators": {}, "stacks": {}}
+
+    def _build_engine(self):
+        self.engine = MultiEngine({
+            "google_api_key": self.config.google_api_key,
+            "google_cse_id": self.config.google_cse_id,
+            "bing_api_key": self.config.bing_api_key,
+            "shodan_api_key": self.config.shodan_api_key,
+        })
+
+    def _init_watchdog(self):
+        watchdog_path = os.path.join(DATA_DIR, "watchdog_jobs.json")
+        self.watchdog = WatchdogManager(watchdog_path, self._watchdog_search)
+        self.watchdog.start_all()
+
+    def _watchdog_search(self, dork: str, engines: list[str]):
+        if self.engine:
+            return self.engine.search(dork, engines=engines, max_results=5)
+        return {}
+
+    def _build_ui(self):
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+
+        self._build_sidebar()
+        self._build_main_area()
+
+    def _build_sidebar(self):
+        sidebar = ctk.CTkFrame(self, width=220, fg_color=COLORS["bg_panel"], corner_radius=0)
+        sidebar.grid(row=0, column=0, sticky="nsew")
+        sidebar.grid_rowconfigure(10, weight=1)
+
+        logo_frame = ctk.CTkFrame(sidebar, fg_color="transparent")
+        logo_frame.grid(row=0, column=0, padx=20, pady=(20, 10), sticky="ew")
+
+        ctk.CTkLabel(logo_frame, text="◈ DORKING", font=ctk.CTkFont("Consolas", 20, "bold"),
+                      text_color=COLORS["accent"]).pack(anchor="w")
+        ctk.CTkLabel(logo_frame, text="OSINT & Security Tool",
+                      font=ctk.CTkFont(size=10), text_color=COLORS["text_dim"]).pack(anchor="w")
+
+        ctk.CTkFrame(sidebar, height=1, fg_color=COLORS["border"]).grid(
+            row=1, column=0, sticky="ew", padx=10, pady=5)
+
+        nav_items = [
+            ("🔍  Dork Builder", "builder"),
+            ("📚  Bibliothèque", "library"),
+            ("🔣  Opérateurs", "operators"),
+            ("📖  Wiki", "wiki"),
+            ("🤖  IA Suggest", "suggest"),
+            ("👁  Watchdog", "watchdog"),
+            ("📊  Résultats", "results"),
+            ("⚙️  Paramètres", "settings"),
+        ]
+
+        self.nav_buttons = {}
+        for i, (label, key) in enumerate(nav_items):
+            btn = ctk.CTkButton(
+                sidebar, text=label, anchor="w",
+                font=ctk.CTkFont("Consolas", 13),
+                fg_color="transparent",
+                text_color=COLORS["text"],
+                hover_color=COLORS["bg_card"],
+                command=lambda k=key: self._show_tab(k),
+                height=38
+            )
+            btn.grid(row=i + 2, column=0, padx=10, pady=2, sticky="ew")
+            self.nav_buttons[key] = btn
+
+        ctk.CTkFrame(sidebar, height=1, fg_color=COLORS["border"]).grid(
+            row=11, column=0, sticky="ew", padx=10, pady=5)
+
+        warning = ctk.CTkLabel(
+            sidebar,
+            text="⚠️ Usage légal uniquement\nAudit autorisé & OSINT",
+            font=ctk.CTkFont(size=9),
+            text_color=COLORS["warning"],
+            justify="center"
+        )
+        warning.grid(row=12, column=0, padx=10, pady=10)
+
+    def _build_main_area(self):
+        main = ctk.CTkFrame(self, fg_color=COLORS["bg_dark"], corner_radius=0)
+        main.grid(row=0, column=1, sticky="nsew")
+        main.grid_columnconfigure(0, weight=1)
+        main.grid_rowconfigure(0, weight=1)
+
+        self.frames = {}
+        for key, cls in [
+            ("builder",   BuilderFrame),
+            ("library",   LibraryFrame),
+            ("operators", OperatorsFrame),
+            ("wiki",      WikiFrame),
+            ("suggest",   SuggestFrame),
+            ("watchdog",  WatchdogFrame),
+            ("results",   ResultsFrame),
+            ("settings",  SettingsFrame),
+        ]:
+            f = cls(main, self)
+            f.grid(row=0, column=0, sticky="nsew")
+            self.frames[key] = f
+
+        self._show_tab("builder")
+
+    def _show_tab(self, key: str):
+        for k, btn in self.nav_buttons.items():
+            btn.configure(
+                fg_color=COLORS["bg_card"] if k == key else "transparent",
+                text_color=COLORS["accent"] if k == key else COLORS["text"]
+            )
+        for k, frame in self.frames.items():
+            if k == key:
+                frame.tkraise()
+                if hasattr(frame, "on_show"):
+                    frame.on_show()
+
+    def run_search(self, dork: str, engines: list[str] | None = None, max_results: int = 10):
+        self.search_results = {}
+        self._show_tab("results")
+        self.frames["results"].start_search(dork, engines, max_results)
+
+    def get_search_results(self):
+        return self.search_results
+
+
+class BuilderFrame(ctk.CTkFrame):
+    def __init__(self, parent, app: DorkingApp):
+        super().__init__(parent, fg_color=COLORS["bg_dark"])
+        self.app = app
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
+        self._build()
+
+    def _build(self):
+        header = ctk.CTkFrame(self, fg_color=COLORS["bg_panel"])
+        header.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
+        header.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(header, text="Dork Builder", font=ctk.CTkFont("Consolas", 22, "bold"),
+                      text_color=COLORS["accent"]).grid(row=0, column=0, padx=20, pady=(15, 2), sticky="w")
+        ctk.CTkLabel(header, text="Construisez et exécutez des requêtes avancées",
+                      font=ctk.CTkFont(size=12), text_color=COLORS["text_dim"]).grid(
+            row=1, column=0, padx=20, pady=(0, 12), sticky="w")
+
+        content = ctk.CTkScrollableFrame(self, fg_color=COLORS["bg_dark"])
+        content.grid(row=1, column=0, sticky="nsew", padx=0, pady=0)
+        content.grid_columnconfigure(0, weight=1)
+
+        query_card = ctk.CTkFrame(content, fg_color=COLORS["bg_card"], corner_radius=8)
+        query_card.grid(row=0, column=0, padx=20, pady=(20, 10), sticky="ew")
+        query_card.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(query_card, text="Requête Dork",
+                      font=ctk.CTkFont("Consolas", 13, "bold"), text_color=COLORS["text"]).grid(
+            row=0, column=0, padx=15, pady=(12, 5), sticky="w")
+
+        self.query_var = ctk.StringVar()
+        self.query_entry = ctk.CTkEntry(
+            query_card, textvariable=self.query_var,
+            font=ctk.CTkFont("Consolas", 13),
+            fg_color=COLORS["bg_input"],
+            border_color=COLORS["accent"],
+            text_color=COLORS["text"],
+            height=45, placeholder_text='site:example.com filetype:sql "password"'
+        )
+        self.query_entry.grid(row=1, column=0, padx=15, pady=5, sticky="ew")
+        self.query_entry.bind("<KeyRelease>", self._on_query_change)
+
+        self.validation_label = ctk.CTkLabel(query_card, text="",
+                                              font=ctk.CTkFont(size=10), text_color=COLORS["success"])
+        self.validation_label.grid(row=2, column=0, padx=15, pady=(0, 5), sticky="w")
+
+        btn_row = ctk.CTkFrame(query_card, fg_color="transparent")
+        btn_row.grid(row=3, column=0, padx=15, pady=(5, 15), sticky="w")
+
+        ctk.CTkButton(btn_row, text="▶ Rechercher", font=ctk.CTkFont("Consolas", 12, "bold"),
+                       fg_color=COLORS["accent"], text_color="#000000",
+                       hover_color="#00A8CC", height=38, width=160,
+                       command=self._search).pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(btn_row, text="📋 Copier", font=ctk.CTkFont("Consolas", 12),
+                       fg_color=COLORS["bg_input"], text_color=COLORS["text"],
+                       hover_color=COLORS["border"], height=38, width=100,
+                       command=self._copy).pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(btn_row, text="🌐 Navigateur", font=ctk.CTkFont("Consolas", 12),
+                       fg_color=COLORS["accent3"], text_color="white",
+                       hover_color="#9333EA", height=38, width=140,
+                       command=self._open_browser).pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(btn_row, text="📄 Rapport HTML", font=ctk.CTkFont("Consolas", 12),
+                       fg_color=COLORS["accent2"], text_color="white",
+                       hover_color="#CC5522", height=38, width=150,
+                       command=self._open_smart_redirector).pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(btn_row, text="🗑 Effacer", font=ctk.CTkFont("Consolas", 12),
+                       fg_color=COLORS["bg_input"], text_color=COLORS["text"],
+                       hover_color=COLORS["border"], height=38, width=100,
+                       command=lambda: self.query_var.set("")).pack(side="left")
+
+        ops_card = ctk.CTkFrame(content, fg_color=COLORS["bg_card"], corner_radius=8)
+        ops_card.grid(row=1, column=0, padx=20, pady=10, sticky="ew")
+        ops_card.grid_columnconfigure(tuple(range(4)), weight=1)
+
+        ctk.CTkLabel(ops_card, text="Opérateurs rapides",
+                      font=ctk.CTkFont("Consolas", 13, "bold"), text_color=COLORS["text"]).grid(
+            row=0, column=0, columnspan=4, padx=15, pady=(12, 8), sticky="w")
+
+        for i, (op, desc) in enumerate(OPERATORS):
+            row, col = divmod(i, 4)
+            btn = ctk.CTkButton(
+                ops_card, text=op, font=ctk.CTkFont("Consolas", 11),
+                fg_color=COLORS["bg_input"], text_color=COLORS["accent"],
+                hover_color=COLORS["border"], height=32,
+                command=lambda o=op: self._insert_operator(o)
+            )
+            btn.grid(row=row + 1, column=col, padx=6, pady=3, sticky="ew")
+
+        ctk.CTkFrame(ops_card, height=10, fg_color="transparent").grid(row=10, column=0)
+
+        builder_card = ctk.CTkFrame(content, fg_color=COLORS["bg_card"], corner_radius=8)
+        builder_card.grid(row=2, column=0, padx=20, pady=10, sticky="ew")
+        builder_card.grid_columnconfigure((1, 3), weight=1)
+
+        ctk.CTkLabel(builder_card, text="Constructeur visuel",
+                      font=ctk.CTkFont("Consolas", 13, "bold"), text_color=COLORS["text"]).grid(
+            row=0, column=0, columnspan=6, padx=15, pady=(12, 8), sticky="w")
+
+        fields = [
+            ("site:", "Domaine (ex: example.com)", 1),
+            ("filetype:", "Extension (ex: sql, env, pdf)", 2),
+            ("intitle:", "Titre de page", 3),
+            ("inurl:", "Chemin URL", 4),
+            ("intext:", "Texte dans la page", 5),
+            ("Mot-clé:", "Terme de recherche", 6),
+        ]
+
+        self.builder_vars = {}
+        self.builder_neg = {}
+
+        for label, placeholder, row in fields:
+            ctk.CTkLabel(builder_card, text=label, font=ctk.CTkFont("Consolas", 11),
+                          text_color=COLORS["text_dim"]).grid(row=row, column=0, padx=(15, 5), pady=3, sticky="w")
+
+            var = ctk.StringVar()
+            entry = ctk.CTkEntry(builder_card, textvariable=var, font=ctk.CTkFont("Consolas", 11),
+                                  fg_color=COLORS["bg_input"], border_color=COLORS["border"],
+                                  text_color=COLORS["text"], height=32, placeholder_text=placeholder)
+            entry.grid(row=row, column=1, padx=5, pady=3, sticky="ew")
+            self.builder_vars[label] = var
+
+            neg_var = tk.BooleanVar()
+            neg_cb = ctk.CTkCheckBox(builder_card, text="NOT", variable=neg_var,
+                                      font=ctk.CTkFont(size=10), text_color=COLORS["text_dim"],
+                                      fg_color=COLORS["danger"], checkmark_color="white",
+                                      border_color=COLORS["border"], width=55)
+            neg_cb.grid(row=row, column=2, padx=5, pady=3)
+            self.builder_neg[label] = neg_var
+
+        ctk.CTkButton(builder_card, text="Générer la requête →",
+                       font=ctk.CTkFont("Consolas", 12),
+                       fg_color=COLORS["accent3"], text_color="white",
+                       hover_color="#9333EA", height=36,
+                       command=self._generate_from_builder).grid(
+            row=7, column=0, columnspan=3, padx=15, pady=(10, 15), sticky="ew")
+
+        engines_card = ctk.CTkFrame(content, fg_color=COLORS["bg_card"], corner_radius=8)
+        engines_card.grid(row=3, column=0, padx=20, pady=(10, 20), sticky="ew")
+
+        ctk.CTkLabel(engines_card, text="Moteurs de recherche",
+                      font=ctk.CTkFont("Consolas", 13, "bold"), text_color=COLORS["text"]).grid(
+            row=0, column=0, columnspan=4, padx=15, pady=(12, 8), sticky="w")
+
+        engines_row = ctk.CTkFrame(engines_card, fg_color="transparent")
+        engines_row.grid(row=1, column=0, padx=15, pady=(0, 15), sticky="w")
+
+        self.engine_vars = {}
+        engine_list = ["DuckDuckGo", "Google CSE", "Bing", "Shodan"]
+        for eng in engine_list:
+            var = tk.BooleanVar(value=eng in self.app.config.default_engines)
+            cb = ctk.CTkCheckBox(engines_row, text=eng, variable=var,
+                                  font=ctk.CTkFont("Consolas", 11), text_color=COLORS["text"],
+                                  fg_color=COLORS["accent"], checkmark_color="#000000",
+                                  border_color=COLORS["border"])
+            cb.pack(side="left", padx=(0, 20))
+            self.engine_vars[eng] = var
+
+        results_row = ctk.CTkFrame(engines_card, fg_color="transparent")
+        results_row.grid(row=2, column=0, padx=15, pady=(0, 15), sticky="w")
+
+        ctk.CTkLabel(results_row, text="Résultats par moteur :",
+                      font=ctk.CTkFont(size=11), text_color=COLORS["text_dim"]).pack(side="left", padx=(0, 10))
+        self.results_slider = ctk.CTkSlider(results_row, from_=5, to=50, number_of_steps=9,
+                                             width=200, fg_color=COLORS["border"],
+                                             progress_color=COLORS["accent"])
+        self.results_slider.set(self.app.config.default_results)
+        self.results_slider.pack(side="left")
+        self.results_label = ctk.CTkLabel(results_row, text=str(int(self.results_slider.get())),
+                                           font=ctk.CTkFont("Consolas", 11), text_color=COLORS["accent"])
+        self.results_label.pack(side="left", padx=10)
+        self.results_slider.configure(command=lambda v: self.results_label.configure(text=str(int(v))))
+
+    def _on_query_change(self, event=None):
+        q = self.query_var.get().strip()
+        if not q:
+            self.validation_label.configure(text="")
+            return
+        info = validate_dork(q)
+        if info["valid"]:
+            ops = ", ".join(info["operators"]) if info["operators"] else "aucun"
+            self.validation_label.configure(
+                text=f"✓ Valide — Opérateurs: {ops} — Complexité: {info['complexity']}",
+                text_color=COLORS["success"]
+            )
+        else:
+            self.validation_label.configure(
+                text="⚠ " + " | ".join(info["issues"]),
+                text_color=COLORS["warning"]
+            )
+
+    def _insert_operator(self, op: str):
+        current = self.query_var.get()
+        if current and not current.endswith(" "):
+            current += " "
+        self.query_var.set(current + op)
+        self.query_entry.focus()
+        self.query_entry.icursor(len(self.query_var.get()))
+
+    def _copy(self):
+        try:
+            import pyperclip
+            pyperclip.copy(self.query_var.get())
+        except Exception:
+            self.clipboard_clear()
+            self.clipboard_append(self.query_var.get())
+
+    def _generate_from_builder(self):
+        b = DorkBuilder()
+        setters = {
+            "site:":     b.set_site,
+            "filetype:": b.set_filetype,
+            "intitle:":  b.set_intitle,
+            "inurl:":    b.set_inurl,
+            "intext:":   b.set_intext,
+        }
+        for label, setter in setters.items():
+            val = self.builder_vars[label].get().strip()
+            neg = self.builder_neg[label].get()
+            if val:
+                setter(val, negated=neg)
+
+        keyword = self.builder_vars["Mot-clé:"].get().strip()
+        if keyword:
+            if self.builder_neg["Mot-clé:"].get():
+                b.add_exclusion(keyword)
+            else:
+                b.add_term(keyword)
+
+        built = b.build()
+        if built:
+            self.query_var.set(built)
+            self._on_query_change()
+
+    def _open_browser(self):
+        dork = self.query_var.get().strip()
+        if not dork:
+            messagebox.showwarning("Dork vide", "Entrez une requête dork avant d'ouvrir le navigateur.")
+            return
+        open_in_browser(dork, "google")
+
+    def _open_smart_redirector(self):
+        """Génère un rapport HTML local avec liens multi-moteurs pour ce dork."""
+        dork = self.query_var.get().strip()
+        if not dork:
+            messagebox.showwarning("Dork vide", "Entrez une requête dork avant de générer le rapport.")
+            return
+        info = validate_dork(dork)
+        dork_data = [{
+            "dork":        dork,
+            "description": "Requête manuelle depuis le Dork Builder",
+            "severity":    "INFO",
+            "category":    "Manuel",
+        }]
+        path = open_smart_redirector(dork_data, title="Audit — Dork Builder")
+        self.app.frames["results"]._log(f"Rapport HTML ouvert : {path}", "info")
+
+    def _search(self):
+        dork = self.query_var.get().strip()
+        if not dork:
+            messagebox.showwarning("Dork vide", "Entrez une requête dork avant de chercher.")
+            return
+        engines = [e for e, v in self.engine_vars.items() if v.get()]
+        if not engines:
+            messagebox.showwarning("Aucun moteur", "Sélectionnez au moins un moteur de recherche.")
+            return
+        max_r = int(self.results_slider.get())
+        self.app.run_search(dork, engines, max_r)
+
+
+class LibraryFrame(ctk.CTkFrame):
+    def __init__(self, parent, app: DorkingApp):
+        super().__init__(parent, fg_color=COLORS["bg_dark"])
+        self.app = app
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
+        self._build()
+
+    def _build(self):
+        header = ctk.CTkFrame(self, fg_color=COLORS["bg_panel"])
+        header.grid(row=0, column=0, sticky="ew")
+        header.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(header, text="Bibliothèque de Dorks",
+                      font=ctk.CTkFont("Consolas", 22, "bold"),
+                      text_color=COLORS["accent"]).grid(row=0, column=0, padx=20, pady=(15, 2), sticky="w")
+
+        ctk.CTkButton(header, text="📄 Rapport HTML complet",
+                       font=ctk.CTkFont("Consolas", 11),
+                       fg_color=COLORS["accent2"], text_color="white",
+                       hover_color="#CC5522", height=32, width=190,
+                       command=self._generate_full_report).grid(
+            row=0, column=2, padx=20, pady=(15, 2), sticky="e")
+
+        search_var = ctk.StringVar()
+        search_entry = ctk.CTkEntry(header, textvariable=search_var, placeholder_text="Filtrer...",
+                                     fg_color=COLORS["bg_input"], border_color=COLORS["border"],
+                                     text_color=COLORS["text"], height=32, width=250)
+        search_entry.grid(row=0, column=1, padx=20, pady=(15, 2), sticky="e")
+        search_var.trace_add("write", lambda *a: self._filter(search_var.get()))
+
+        self.target_var = ctk.StringVar(value="")
+        target_entry = ctk.CTkEntry(header, textvariable=self.target_var,
+                                     placeholder_text="Domaine cible (ex: example.com)",
+                                     fg_color=COLORS["bg_input"], border_color=COLORS["accent"],
+                                     text_color=COLORS["text"], height=32, width=280)
+        target_entry.grid(row=1, column=0, columnspan=2, padx=20, pady=(0, 12), sticky="w")
+
+        main_area = ctk.CTkFrame(self, fg_color=COLORS["bg_dark"])
+        main_area.grid(row=1, column=0, sticky="nsew")
+        main_area.grid_columnconfigure(0, weight=1)
+        main_area.grid_rowconfigure(0, weight=1)
+
+        self.scroll = ctk.CTkScrollableFrame(main_area, fg_color=COLORS["bg_dark"])
+        self.scroll.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        self.scroll.grid_columnconfigure(0, weight=1)
+
+        self._render_library(self.app.dork_library.get("categories", {}))
+
+    def _render_library(self, categories: dict, filter_text: str = ""):
+        for widget in self.scroll.winfo_children():
+            widget.destroy()
+
+        row = 0
+        for cat_name, dorks in categories.items():
+            shown = [d for d in dorks if not filter_text or
+                     filter_text.lower() in d.get("name", "").lower() or
+                     filter_text.lower() in d.get("dork", "").lower() or
+                     filter_text.lower() in " ".join(d.get("tags", [])).lower()]
+            if not shown:
+                continue
+
+            cat_label = ctk.CTkLabel(self.scroll, text=f"▸ {cat_name}",
+                                      font=ctk.CTkFont("Consolas", 14, "bold"),
+                                      text_color=COLORS["accent2"])
+            cat_label.grid(row=row, column=0, padx=20, pady=(15, 5), sticky="w")
+            row += 1
+
+            for dork_data in shown:
+                self._add_dork_card(row, dork_data)
+                row += 1
+
+    def _add_dork_card(self, row: int, data: dict):
+        severity = data.get("severity", "INFO")
+        sev_color = SEVERITY_COLORS.get(severity, COLORS["text_dim"])
+
+        card = ctk.CTkFrame(self.scroll, fg_color=COLORS["bg_card"], corner_radius=6)
+        card.grid(row=row, column=0, padx=20, pady=3, sticky="ew")
+        card.grid_columnconfigure(0, weight=1)
+
+        top = ctk.CTkFrame(card, fg_color="transparent")
+        top.grid(row=0, column=0, padx=12, pady=(8, 2), sticky="ew")
+        top.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(top, text=data.get("name", ""), font=ctk.CTkFont("Consolas", 11, "bold"),
+                      text_color=COLORS["text"]).grid(row=0, column=0, sticky="w")
+
+        sev_badge = ctk.CTkLabel(top, text=f" {severity} ", font=ctk.CTkFont(size=9, weight="bold"),
+                                  fg_color=sev_color, text_color="#000000", corner_radius=3)
+        sev_badge.grid(row=0, column=1, padx=5, sticky="e")
+
+        dork_text = ctk.CTkLabel(card, text=data.get("dork", ""),
+                                  font=ctk.CTkFont("Consolas", 10),
+                                  text_color=COLORS["accent"],
+                                  wraplength=700, justify="left")
+        dork_text.grid(row=1, column=0, padx=12, pady=2, sticky="w")
+
+        ctk.CTkLabel(card, text=data.get("description", ""),
+                      font=ctk.CTkFont(size=10), text_color=COLORS["text_dim"],
+                      wraplength=700, justify="left").grid(row=2, column=0, padx=12, pady=(0, 4), sticky="w")
+
+        tags = data.get("tags", [])
+        if tags:
+            tags_frame = ctk.CTkFrame(card, fg_color="transparent")
+            tags_frame.grid(row=3, column=0, padx=12, pady=(0, 4), sticky="w")
+            for tag in tags[:5]:
+                ctk.CTkLabel(tags_frame, text=f"#{tag}", font=ctk.CTkFont(size=9),
+                              text_color=COLORS["text_dim"],
+                              fg_color=COLORS["bg_input"], corner_radius=3).pack(side="left", padx=(0, 4))
+
+        btn_frame = ctk.CTkFrame(card, fg_color="transparent")
+        btn_frame.grid(row=4, column=0, padx=12, pady=(2, 10), sticky="w")
+
+        raw_dork = data.get("dork", "")
+        ctk.CTkButton(btn_frame, text="▶ Utiliser", font=ctk.CTkFont("Consolas", 10),
+                       fg_color=COLORS["accent"], text_color="#000000",
+                       hover_color="#00A8CC", height=28, width=90,
+                       command=lambda d=raw_dork: self._use_dork(d)).pack(side="left", padx=(0, 6))
+
+        ctk.CTkButton(btn_frame, text="📋 Copier", font=ctk.CTkFont("Consolas", 10),
+                       fg_color=COLORS["bg_input"], text_color=COLORS["text"],
+                       hover_color=COLORS["border"], height=28, width=80,
+                       command=lambda d=raw_dork: self._copy_dork(d)).pack(side="left")
+
+    def _use_dork(self, dork: str):
+        target = self.target_var.get().strip()
+        final = from_template(dork, target) if target else dork
+        self.app.frames["builder"].query_var.set(final)
+        self.app._show_tab("builder")
+
+    def _copy_dork(self, dork: str):
+        target = self.target_var.get().strip()
+        final = from_template(dork, target) if target else dork
+        try:
+            import pyperclip
+            pyperclip.copy(final)
+        except Exception:
+            self.clipboard_clear()
+            self.clipboard_append(final)
+
+    def _generate_full_report(self):
+        """Génère un rapport HTML de toute la bibliothèque, groupé par sévérité."""
+        categories = self.app.dork_library.get("categories", {})
+        target = self.target_var.get().strip()
+        all_dorks = []
+        for cat_name, dorks in categories.items():
+            for d in dorks:
+                entry = dict(d)
+                entry["category"] = cat_name
+                if target:
+                    entry["dork"] = entry.get("dork", "").replace("{target}", target)
+                all_dorks.append(entry)
+
+        if not all_dorks:
+            messagebox.showinfo("Bibliothèque vide", "Aucun dork dans la bibliothèque.")
+            return
+
+        path = open_smart_redirector(
+            all_dorks,
+            title=f"Audit OSINT — Bibliothèque complète{f' ({target})' if target else ''}",
+            target=target,
+        )
+        self.app.frames["results"]._log(f"Rapport HTML bibliotheque : {path}", "info")
+
+    def _filter(self, text: str):
+        self._render_library(self.app.dork_library.get("categories", {}), text)
+
+
+class OperatorsFrame(ctk.CTkFrame):
+    """Référence complète de tous les opérateurs Google Dork."""
+
+    CATEGORIES = {
+        "Ciblage":    "#00D4FF",
+        "Fichiers":   "#FF6B35",
+        "Page":       "#A855F7",
+        "URL":        "#00FF88",
+        "Contenu":    "#FFD700",
+        "Archive":    "#888888",
+        "Proximité":  "#FF4444",
+        "Logique":    "#00D4FF",
+        "Précision":  "#FFD700",
+        "Découverte": "#A855F7",
+        "Info":       "#888888",
+    }
+
+    def __init__(self, parent, app: "DorkingApp"):
+        super().__init__(parent, fg_color=COLORS["bg_dark"])
+        self.app = app
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
+        self._build()
+
+    def _build(self):
+        # ── En-tête ──────────────────────────────────────────────────────
+        header = ctk.CTkFrame(self, fg_color=COLORS["bg_panel"])
+        header.grid(row=0, column=0, sticky="ew")
+        header.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(header, text="Référence des Opérateurs",
+                      font=ctk.CTkFont("Consolas", 22, "bold"),
+                      text_color=COLORS["accent"]).grid(
+            row=0, column=0, padx=20, pady=(15, 2), sticky="w")
+        ctk.CTkLabel(header, text="16 opérateurs Google Dork — syntaxe, description et exemples",
+                      font=ctk.CTkFont(size=12), text_color=COLORS["text_dim"]).grid(
+            row=1, column=0, columnspan=2, padx=20, pady=(0, 12), sticky="w")
+
+        # Barre de recherche rapide
+        self._filter_var = ctk.StringVar()
+        ctk.CTkEntry(header, textvariable=self._filter_var,
+                      placeholder_text="Filtrer les opérateurs...",
+                      fg_color=COLORS["bg_input"], border_color=COLORS["border"],
+                      text_color=COLORS["text"], height=32, width=260).grid(
+            row=0, column=1, padx=20, pady=(15, 2), sticky="e")
+        self._filter_var.trace_add("write", lambda *_: self._render())
+
+        # ── Contenu scrollable ───────────────────────────────────────────
+        self._scroll = ctk.CTkScrollableFrame(self, fg_color=COLORS["bg_dark"])
+        self._scroll.grid(row=1, column=0, sticky="nsew")
+        self._scroll.grid_columnconfigure(0, weight=1)
+
+        self._render()
+
+    def _render(self):
+        for w in self._scroll.winfo_children():
+            w.destroy()
+
+        operators = self.app.dork_library.get("operators", {})
+        q = self._filter_var.get().strip().lower()
+
+        # Groupe par catégorie
+        by_cat: dict[str, list[tuple[str, dict]]] = {}
+        for op_key, op_data in operators.items():
+            if q and q not in op_key.lower() and q not in op_data.get("description", "").lower():
+                continue
+            cat = op_data.get("category", "Autre")
+            by_cat.setdefault(cat, []).append((op_key, op_data))
+
+        if not by_cat:
+            ctk.CTkLabel(self._scroll, text="Aucun opérateur correspond au filtre.",
+                          font=ctk.CTkFont(size=11), text_color=COLORS["text_dim"]).grid(
+                row=0, column=0, padx=20, pady=40)
+            return
+
+        row = 0
+        for cat_name, ops in by_cat.items():
+            cat_color = self.CATEGORIES.get(cat_name, "#888888")
+
+            # En-tête de catégorie
+            cat_frame = ctk.CTkFrame(self._scroll, fg_color="transparent")
+            cat_frame.grid(row=row, column=0, padx=20, pady=(16, 4), sticky="ew")
+            cat_frame.grid_columnconfigure(1, weight=1)
+
+            ctk.CTkLabel(cat_frame, text=f"  {cat_name}  ",
+                          font=ctk.CTkFont("Consolas", 11, "bold"),
+                          fg_color=cat_color, text_color="#000000",
+                          corner_radius=4).grid(row=0, column=0, sticky="w")
+            ctk.CTkFrame(cat_frame, height=1, fg_color=COLORS["border"]).grid(
+                row=0, column=1, padx=(10, 0), sticky="ew")
+            row += 1
+
+            for op_key, op_data in ops:
+                self._add_op_card(row, op_key, op_data, cat_color)
+                row += 1
+
+    def _add_op_card(self, row: int, op_key: str, data: dict, color: str):
+        syntax      = data.get("syntax", op_key)
+        description = data.get("description", "")
+        example     = data.get("example", "")
+
+        card = ctk.CTkFrame(self._scroll, fg_color=COLORS["bg_card"],
+                             corner_radius=6, border_width=1,
+                             border_color=COLORS["border"])
+        card.grid(row=row, column=0, padx=20, pady=3, sticky="ew")
+        card.grid_columnconfigure(1, weight=1)
+
+        # Colonne gauche — syntaxe
+        syntax_frame = ctk.CTkFrame(card, fg_color=COLORS["bg_input"],
+                                     corner_radius=4, width=210)
+        syntax_frame.grid(row=0, column=0, padx=(12, 8), pady=12, sticky="ns")
+        syntax_frame.grid_propagate(False)
+        syntax_frame.grid_rowconfigure(0, weight=1)
+        syntax_frame.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(syntax_frame, text=syntax,
+                      font=ctk.CTkFont("Consolas", 12, "bold"),
+                      text_color=color, wraplength=190,
+                      justify="center").grid(row=0, column=0, padx=8, pady=8, sticky="nsew")
+
+        # Colonne droite — infos
+        info = ctk.CTkFrame(card, fg_color="transparent")
+        info.grid(row=0, column=1, padx=(0, 12), pady=12, sticky="ew")
+        info.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(info, text=description,
+                      font=ctk.CTkFont(size=12),
+                      text_color=COLORS["text"],
+                      wraplength=560, justify="left").grid(
+            row=0, column=0, sticky="w")
+
+        if example:
+            ex_frame = ctk.CTkFrame(info, fg_color=COLORS["bg_dark"], corner_radius=4)
+            ex_frame.grid(row=1, column=0, pady=(6, 0), sticky="ew")
+            ex_frame.grid_columnconfigure(0, weight=1)
+
+            ctk.CTkLabel(ex_frame, text=f"  {example}",
+                          font=ctk.CTkFont("Consolas", 10),
+                          text_color=COLORS["text_dim"],
+                          wraplength=540, justify="left").grid(
+                row=0, column=0, padx=4, pady=4, sticky="w")
+
+            ctk.CTkButton(ex_frame, text="↗ Utiliser",
+                           font=ctk.CTkFont("Consolas", 9),
+                           fg_color="transparent", text_color=COLORS["accent"],
+                           hover_color=COLORS["border"], height=24, width=80,
+                           command=lambda ex=example: self._use(ex)).grid(
+                row=0, column=1, padx=(0, 4), pady=4)
+
+    def _use(self, example: str):
+        self.app.frames["builder"].query_var.set(example)
+        self.app._show_tab("builder")
+
+
+class SuggestFrame(ctk.CTkFrame):
+    def __init__(self, parent, app: DorkingApp):
+        super().__init__(parent, fg_color=COLORS["bg_dark"])
+        self.app = app
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
+        self._build()
+
+    def _build(self):
+        header = ctk.CTkFrame(self, fg_color=COLORS["bg_panel"])
+        header.grid(row=0, column=0, sticky="ew")
+        header.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(header, text="🤖 Dork Suggest — IA",
+                      font=ctk.CTkFont("Consolas", 22, "bold"),
+                      text_color=COLORS["accent"]).grid(row=0, column=0, padx=20, pady=(15, 2), sticky="w")
+        ctk.CTkLabel(header, text="Génération automatique de dorks via Claude AI",
+                      font=ctk.CTkFont(size=12), text_color=COLORS["text_dim"]).grid(
+            row=1, column=0, padx=20, pady=(0, 12), sticky="w")
+
+        content = ctk.CTkScrollableFrame(self, fg_color=COLORS["bg_dark"])
+        content.grid(row=1, column=0, sticky="nsew")
+        content.grid_columnconfigure(0, weight=1)
+
+        form_card = ctk.CTkFrame(content, fg_color=COLORS["bg_card"], corner_radius=8)
+        form_card.grid(row=0, column=0, padx=20, pady=20, sticky="ew")
+        form_card.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(form_card, text="Paramètres de génération",
+                      font=ctk.CTkFont("Consolas", 13, "bold"), text_color=COLORS["text"]).grid(
+            row=0, column=0, columnspan=2, padx=15, pady=(12, 8), sticky="w")
+
+        fields = [
+            ("Entreprise / Cible :", "company", "Ex: Acme Corp"),
+            ("Domaine :", "domain", "Ex: acme.com"),
+            ("Stack technique :", "stack", "Ex: WordPress, AWS, Django"),
+            ("Objectif :", "objective", "Ex: audit sécurité, recherche credentials"),
+        ]
+
+        self.suggest_vars = {}
+        for row, (label, key, placeholder) in enumerate(fields, start=1):
+            ctk.CTkLabel(form_card, text=label, font=ctk.CTkFont("Consolas", 11),
+                          text_color=COLORS["text_dim"]).grid(row=row, column=0, padx=15, pady=4, sticky="w")
+            var = ctk.StringVar()
+            entry = ctk.CTkEntry(form_card, textvariable=var, font=ctk.CTkFont("Consolas", 11),
+                                  fg_color=COLORS["bg_input"], border_color=COLORS["border"],
+                                  text_color=COLORS["text"], height=32, placeholder_text=placeholder)
+            entry.grid(row=row, column=1, padx=15, pady=4, sticky="ew")
+            self.suggest_vars[key] = var
+
+        count_row = ctk.CTkFrame(form_card, fg_color="transparent")
+        count_row.grid(row=5, column=0, columnspan=2, padx=15, pady=4, sticky="w")
+        ctk.CTkLabel(count_row, text="Nombre de dorks :", font=ctk.CTkFont("Consolas", 11),
+                      text_color=COLORS["text_dim"]).pack(side="left", padx=(0, 10))
+        self.count_slider = ctk.CTkSlider(count_row, from_=10, to=50, number_of_steps=8,
+                                           width=200, fg_color=COLORS["border"],
+                                           progress_color=COLORS["accent3"])
+        self.count_slider.set(20)
+        self.count_slider.pack(side="left")
+        self.count_label = ctk.CTkLabel(count_row, text="20",
+                                         font=ctk.CTkFont("Consolas", 11), text_color=COLORS["accent3"])
+        self.count_label.pack(side="left", padx=10)
+        self.count_slider.configure(command=lambda v: self.count_label.configure(text=str(int(v))))
+
+        stack_presets = ctk.CTkFrame(form_card, fg_color="transparent")
+        stack_presets.grid(row=6, column=0, columnspan=2, padx=15, pady=4, sticky="w")
+        ctk.CTkLabel(stack_presets, text="Presets stack :", font=ctk.CTkFont(size=10),
+                      text_color=COLORS["text_dim"]).pack(side="left", padx=(0, 8))
+        for stack in ["WordPress", "Apache/PHP", "Node.js", "Django/Python", "AWS"]:
+            ctk.CTkButton(stack_presets, text=stack, font=ctk.CTkFont(size=9),
+                           fg_color=COLORS["bg_input"], text_color=COLORS["text"],
+                           hover_color=COLORS["border"], height=26, width=80,
+                           command=lambda s=stack: self.suggest_vars["stack"].set(s)
+                           ).pack(side="left", padx=(0, 4))
+
+        self.generate_btn = ctk.CTkButton(form_card, text="🤖 Générer les Dorks",
+                                           font=ctk.CTkFont("Consolas", 13, "bold"),
+                                           fg_color=COLORS["accent3"], text_color="white",
+                                           hover_color="#9333EA", height=42,
+                                           command=self._generate)
+        self.generate_btn.grid(row=7, column=0, columnspan=2, padx=15, pady=(10, 15), sticky="ew")
+
+        self.status_label = ctk.CTkLabel(content, text="", font=ctk.CTkFont(size=11),
+                                          text_color=COLORS["text_dim"])
+        self.status_label.grid(row=1, column=0, padx=20, pady=5, sticky="w")
+
+        self.results_frame = ctk.CTkFrame(content, fg_color=COLORS["bg_dark"])
+        self.results_frame.grid(row=2, column=0, padx=0, pady=0, sticky="ew")
+        self.results_frame.grid_columnconfigure(0, weight=1)
+
+    def _generate(self):
+        company = self.suggest_vars["company"].get().strip()
+        if not company:
+            messagebox.showwarning("Champ manquant", "Entrez un nom d'entreprise ou de cible.")
+            return
+
+        api_key = self.app.config.anthropic_api_key
+        if not api_key:
+            messagebox.showerror("Clé API manquante",
+                                  "Configurez votre clé API Anthropic dans Paramètres > Clé Anthropic.")
+            return
+
+        self.generate_btn.configure(state="disabled", text="⏳ Génération en cours...")
+        self.status_label.configure(text="Interrogation de Claude AI...", text_color=COLORS["text_dim"])
+
+        threading.Thread(target=self._do_generate, daemon=True).start()
+
+    def _do_generate(self):
+        try:
+            company = self.suggest_vars["company"].get().strip()
+            domain = self.suggest_vars["domain"].get().strip()
+            stack = self.suggest_vars["stack"].get().strip() or "inconnu"
+            objective = self.suggest_vars["objective"].get().strip() or "audit de sécurité"
+            count = int(self.count_slider.get())
+
+            if domain:
+                from core.dork_suggest import generate_dorks
+                dorks = generate_dorks(
+                    target=domain, stack=stack, objective=objective,
+                    count=count, api_key=self.app.config.anthropic_api_key
+                )
+            else:
+                from core.dork_suggest import generate_dorks_from_company
+                dorks = generate_dorks_from_company(
+                    company_name=company, domain=domain,
+                    count=count, api_key=self.app.config.anthropic_api_key
+                )
+
+            self.after(0, lambda: self._show_results(dorks))
+        except Exception as e:
+            self.after(0, lambda: self._show_error(str(e)))
+
+    def _show_results(self, dorks: list[dict]):
+        self.generate_btn.configure(state="normal", text="🤖 Générer les Dorks")
+        self.status_label.configure(text=f"✓ {len(dorks)} dorks générés", text_color=COLORS["success"])
+
+        for w in self.results_frame.winfo_children():
+            w.destroy()
+
+        for i, d in enumerate(dorks):
+            severity = d.get("severity", "INFO")
+            sev_color = SEVERITY_COLORS.get(severity, COLORS["text_dim"])
+
+            card = ctk.CTkFrame(self.results_frame, fg_color=COLORS["bg_card"], corner_radius=6)
+            card.grid(row=i, column=0, padx=20, pady=3, sticky="ew")
+            card.grid_columnconfigure(0, weight=1)
+
+            top = ctk.CTkFrame(card, fg_color="transparent")
+            top.grid(row=0, column=0, padx=12, pady=(8, 2), sticky="ew")
+            top.grid_columnconfigure(0, weight=1)
+
+            ctk.CTkLabel(top, text=d.get("category", ""), font=ctk.CTkFont(size=9),
+                          text_color=COLORS["text_dim"]).grid(row=0, column=0, sticky="w")
+            ctk.CTkLabel(top, text=f" {severity} ", font=ctk.CTkFont(size=9, weight="bold"),
+                          fg_color=sev_color, text_color="#000000", corner_radius=3).grid(
+                row=0, column=1, sticky="e")
+
+            ctk.CTkLabel(card, text=d.get("dork", ""),
+                          font=ctk.CTkFont("Consolas", 10), text_color=COLORS["accent"],
+                          wraplength=700, justify="left").grid(row=1, column=0, padx=12, pady=2, sticky="w")
+
+            ctk.CTkLabel(card, text=d.get("description", ""),
+                          font=ctk.CTkFont(size=10), text_color=COLORS["text_dim"],
+                          wraplength=700, justify="left").grid(row=2, column=0, padx=12, pady=(0, 4), sticky="w")
+
+            btn_f = ctk.CTkFrame(card, fg_color="transparent")
+            btn_f.grid(row=3, column=0, padx=12, pady=(2, 10), sticky="w")
+
+            dork_str = d.get("dork", "")
+            ctk.CTkButton(btn_f, text="▶ Utiliser", font=ctk.CTkFont("Consolas", 10),
+                           fg_color=COLORS["accent"], text_color="#000000",
+                           hover_color="#00A8CC", height=28, width=90,
+                           command=lambda ds=dork_str: self._use(ds)).pack(side="left", padx=(0, 6))
+            ctk.CTkButton(btn_f, text="📋 Copier", font=ctk.CTkFont("Consolas", 10),
+                           fg_color=COLORS["bg_input"], text_color=COLORS["text"],
+                           hover_color=COLORS["border"], height=28, width=80,
+                           command=lambda ds=dork_str: self._copy(ds)).pack(side="left")
+
+    def _show_error(self, error: str):
+        self.generate_btn.configure(state="normal", text="🤖 Générer les Dorks")
+        self.status_label.configure(text=f"Erreur : {error}", text_color=COLORS["danger"])
+
+    def _use(self, dork: str):
+        self.app.frames["builder"].query_var.set(dork)
+        self.app._show_tab("builder")
+
+    def _copy(self, dork: str):
+        try:
+            import pyperclip
+            pyperclip.copy(dork)
+        except Exception:
+            self.clipboard_clear()
+            self.clipboard_append(dork)
+
+
+class WatchdogFrame(ctk.CTkFrame):
+    def __init__(self, parent, app: DorkingApp):
+        super().__init__(parent, fg_color=COLORS["bg_dark"])
+        self.app = app
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
+        self._build()
+
+    def on_show(self):
+        self._refresh_jobs()
+
+    def _build(self):
+        header = ctk.CTkFrame(self, fg_color=COLORS["bg_panel"])
+        header.grid(row=0, column=0, sticky="ew")
+        header.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(header, text="👁 Watchdog — Surveillance",
+                      font=ctk.CTkFont("Consolas", 22, "bold"),
+                      text_color=COLORS["accent"]).grid(row=0, column=0, padx=20, pady=(15, 2), sticky="w")
+        ctk.CTkLabel(header, text="Recevez une alerte quand de nouveaux résultats apparaissent",
+                      font=ctk.CTkFont(size=12), text_color=COLORS["text_dim"]).grid(
+            row=1, column=0, padx=20, pady=(0, 12), sticky="w")
+
+        content = ctk.CTkScrollableFrame(self, fg_color=COLORS["bg_dark"])
+        content.grid(row=1, column=0, sticky="nsew")
+        content.grid_columnconfigure(0, weight=1)
+
+        form_card = ctk.CTkFrame(content, fg_color=COLORS["bg_card"], corner_radius=8)
+        form_card.grid(row=0, column=0, padx=20, pady=20, sticky="ew")
+        form_card.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(form_card, text="Nouvelle surveillance",
+                      font=ctk.CTkFont("Consolas", 13, "bold"), text_color=COLORS["text"]).grid(
+            row=0, column=0, columnspan=2, padx=15, pady=(12, 8), sticky="w")
+
+        self.wdog_vars = {}
+        fields = [
+            ("Nom :", "name", "Nom de la surveillance"),
+            ("Dork :", "dork", "site:example.com filetype:sql"),
+            ("Intervalle (min) :", "interval", "60"),
+            ("Discord Webhook :", "discord", "https://discord.com/api/webhooks/..."),
+        ]
+        for row, (label, key, placeholder) in enumerate(fields, 1):
+            ctk.CTkLabel(form_card, text=label, font=ctk.CTkFont("Consolas", 11),
+                          text_color=COLORS["text_dim"]).grid(row=row, column=0, padx=15, pady=4, sticky="w")
+            var = ctk.StringVar()
+            ctk.CTkEntry(form_card, textvariable=var, font=ctk.CTkFont("Consolas", 11),
+                          fg_color=COLORS["bg_input"], border_color=COLORS["border"],
+                          text_color=COLORS["text"], height=32, placeholder_text=placeholder).grid(
+                row=row, column=1, padx=15, pady=4, sticky="ew")
+            self.wdog_vars[key] = var
+
+        engines_row = ctk.CTkFrame(form_card, fg_color="transparent")
+        engines_row.grid(row=5, column=0, columnspan=2, padx=15, pady=4, sticky="w")
+        ctk.CTkLabel(engines_row, text="Moteurs :", font=ctk.CTkFont("Consolas", 11),
+                      text_color=COLORS["text_dim"]).pack(side="left", padx=(0, 10))
+        self.wdog_engine_vars = {}
+        for eng in ["DuckDuckGo", "Google CSE", "Bing"]:
+            var = tk.BooleanVar(value=eng == "DuckDuckGo")
+            ctk.CTkCheckBox(engines_row, text=eng, variable=var,
+                             font=ctk.CTkFont(size=10), text_color=COLORS["text"],
+                             fg_color=COLORS["accent"], checkmark_color="#000000",
+                             border_color=COLORS["border"]).pack(side="left", padx=(0, 15))
+            self.wdog_engine_vars[eng] = var
+
+        ctk.CTkButton(form_card, text="+ Ajouter la surveillance",
+                       font=ctk.CTkFont("Consolas", 12, "bold"),
+                       fg_color=COLORS["success"], text_color="#000000",
+                       hover_color="#00CC70", height=40,
+                       command=self._add_job).grid(
+            row=6, column=0, columnspan=2, padx=15, pady=(10, 15), sticky="ew")
+
+        ctk.CTkLabel(content, text="Surveillances actives",
+                      font=ctk.CTkFont("Consolas", 14, "bold"),
+                      text_color=COLORS["text"]).grid(row=1, column=0, padx=20, pady=(10, 5), sticky="w")
+
+        self.jobs_frame = ctk.CTkFrame(content, fg_color=COLORS["bg_dark"])
+        self.jobs_frame.grid(row=2, column=0, padx=0, pady=0, sticky="ew")
+        self.jobs_frame.grid_columnconfigure(0, weight=1)
+
+    def _add_job(self):
+        name = self.wdog_vars["name"].get().strip()
+        dork = self.wdog_vars["dork"].get().strip()
+        if not name or not dork:
+            messagebox.showwarning("Champs manquants", "Nom et Dork requis.")
+            return
+        try:
+            interval = int(self.wdog_vars["interval"].get().strip() or "60")
+        except ValueError:
+            interval = 60
+
+        engines = [e for e, v in self.wdog_engine_vars.items() if v.get()]
+        job = WatchdogJob(
+            id=str(uuid.uuid4())[:8],
+            name=name, dork=dork,
+            engines=engines or ["DuckDuckGo"],
+            interval_minutes=interval,
+            discord_webhook=self.wdog_vars["discord"].get().strip()
+        )
+        self.app.watchdog.add_job(job)
+        for v in self.wdog_vars.values():
+            v.set("")
+        self._refresh_jobs()
+
+    def _refresh_jobs(self):
+        for w in self.jobs_frame.winfo_children():
+            w.destroy()
+
+        jobs = list(self.app.watchdog.jobs.values())
+        if not jobs:
+            ctk.CTkLabel(self.jobs_frame, text="Aucune surveillance configurée.",
+                          font=ctk.CTkFont(size=11), text_color=COLORS["text_dim"]).grid(
+                row=0, column=0, padx=20, pady=20)
+            return
+
+        for i, job in enumerate(jobs):
+            card = ctk.CTkFrame(self.jobs_frame, fg_color=COLORS["bg_card"], corner_radius=6)
+            card.grid(row=i, column=0, padx=20, pady=3, sticky="ew")
+            card.grid_columnconfigure(0, weight=1)
+
+            info = ctk.CTkFrame(card, fg_color="transparent")
+            info.grid(row=0, column=0, padx=12, pady=(8, 4), sticky="ew")
+            info.grid_columnconfigure(0, weight=1)
+
+            status_color = COLORS["success"] if job.active else COLORS["text_dim"]
+            status_text = "● ACTIF" if job.active else "○ INACTIF"
+
+            ctk.CTkLabel(info, text=job.name, font=ctk.CTkFont("Consolas", 12, "bold"),
+                          text_color=COLORS["text"]).grid(row=0, column=0, sticky="w")
+            ctk.CTkLabel(info, text=status_text, font=ctk.CTkFont("Consolas", 10, "bold"),
+                          text_color=status_color).grid(row=0, column=1, sticky="e")
+
+            ctk.CTkLabel(card, text=job.dork, font=ctk.CTkFont("Consolas", 10),
+                          text_color=COLORS["accent"]).grid(row=1, column=0, padx=12, pady=2, sticky="w")
+
+            meta = f"Intervalle: {job.interval_minutes}min | Moteurs: {', '.join(job.engines)} | URLs connues: {len(job.known_urls)}"
+            if job.last_run:
+                meta += f" | Dernier scan: {job.last_run[:16]}"
+            ctk.CTkLabel(card, text=meta, font=ctk.CTkFont(size=9), text_color=COLORS["text_dim"]).grid(
+                row=2, column=0, padx=12, pady=(0, 4), sticky="w")
+
+            btns = ctk.CTkFrame(card, fg_color="transparent")
+            btns.grid(row=3, column=0, padx=12, pady=(2, 10), sticky="w")
+
+            toggle_text = "⏸ Pause" if job.active else "▶ Activer"
+            ctk.CTkButton(btns, text=toggle_text, font=ctk.CTkFont("Consolas", 10),
+                           fg_color=COLORS["warning"] if job.active else COLORS["success"],
+                           text_color="#000000", height=28, width=90,
+                           command=lambda jid=job.id: self._toggle(jid)).pack(side="left", padx=(0, 6))
+            ctk.CTkButton(btns, text="🗑 Supprimer", font=ctk.CTkFont("Consolas", 10),
+                           fg_color=COLORS["danger"], text_color="white", height=28, width=110,
+                           command=lambda jid=job.id: self._delete(jid)).pack(side="left")
+
+    def _toggle(self, job_id: str):
+        self.app.watchdog.toggle_job(job_id)
+        self._refresh_jobs()
+
+    def _delete(self, job_id: str):
+        if messagebox.askyesno("Confirmer", "Supprimer cette surveillance ?"):
+            self.app.watchdog.remove_job(job_id)
+            self._refresh_jobs()
+
+
+class ResultsFrame(ctk.CTkFrame):
+    def __init__(self, parent, app: DorkingApp):
+        super().__init__(parent, fg_color=COLORS["bg_dark"])
+        self.app = app
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(2, weight=1)
+        self._current_dork = ""
+        self._build()
+
+    def _build(self):
+        header = ctk.CTkFrame(self, fg_color=COLORS["bg_panel"])
+        header.grid(row=0, column=0, sticky="ew")
+        header.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(header, text="Résultats",
+                      font=ctk.CTkFont("Consolas", 22, "bold"),
+                      text_color=COLORS["accent"]).grid(row=0, column=0, padx=20, pady=(15, 2), sticky="w")
+
+        export_frame = ctk.CTkFrame(header, fg_color="transparent")
+        export_frame.grid(row=0, column=2, padx=20, pady=(15, 2), sticky="e")
+
+        ctk.CTkButton(export_frame, text="↓ JSON", font=ctk.CTkFont("Consolas", 10),
+                       fg_color=COLORS["bg_input"], text_color=COLORS["text"],
+                       hover_color=COLORS["border"], height=30, width=75,
+                       command=lambda: self._export("json")).pack(side="left", padx=(0, 4))
+        ctk.CTkButton(export_frame, text="↓ CSV", font=ctk.CTkFont("Consolas", 10),
+                       fg_color=COLORS["bg_input"], text_color=COLORS["text"],
+                       hover_color=COLORS["border"], height=30, width=75,
+                       command=lambda: self._export("csv")).pack(side="left", padx=(0, 4))
+        ctk.CTkButton(export_frame, text="↓ PDF", font=ctk.CTkFont("Consolas", 10),
+                       fg_color=COLORS["accent2"], text_color="white",
+                       hover_color="#CC5522", height=30, width=75,
+                       command=lambda: self._export("pdf")).pack(side="left", padx=(0, 4))
+
+        ctk.CTkButton(export_frame, text="🔗 HTML", font=ctk.CTkFont("Consolas", 10),
+                       fg_color=COLORS["accent3"], text_color="white",
+                       hover_color="#9333EA", height=30, width=75,
+                       command=lambda: self._export("html")).pack(side="left")
+
+        self.dork_label = ctk.CTkLabel(header, text="",
+                                        font=ctk.CTkFont("Consolas", 10),
+                                        text_color=COLORS["text_dim"])
+        self.dork_label.grid(row=1, column=0, padx=20, pady=(0, 12), sticky="w")
+
+        # Boutons "Ouvrir dans le navigateur" — voir exactement ce qu'un humain voit
+        browser_frame = ctk.CTkFrame(header, fg_color="transparent")
+        browser_frame.grid(row=1, column=2, padx=20, pady=(0, 12), sticky="e")
+
+        ctk.CTkLabel(browser_frame, text="Navigateur réel :",
+                      font=ctk.CTkFont(size=9), text_color=COLORS["text_dim"]).pack(side="left", padx=(0, 6))
+        for engine_name, engine_key in [("Google", "google"), ("Bing", "bing"), ("DDG", "ddg")]:
+            ctk.CTkButton(
+                browser_frame, text=engine_name, font=ctk.CTkFont("Consolas", 9),
+                fg_color=COLORS["bg_input"], text_color=COLORS["accent"],
+                hover_color=COLORS["border"], height=26, width=60,
+                command=lambda k=engine_key: self._open_browser(k)
+            ).pack(side="left", padx=(0, 3))
+
+        # Live Console — terminal de suivi en temps réel
+        console_frame = ctk.CTkFrame(self, fg_color=COLORS["bg_panel"], height=140)
+        console_frame.grid(row=1, column=0, sticky="ew", padx=0, pady=0)
+        console_frame.grid_columnconfigure(0, weight=1)
+        console_frame.grid_propagate(False)
+
+        console_header = ctk.CTkFrame(console_frame, fg_color="transparent")
+        console_header.grid(row=0, column=0, sticky="ew", padx=12, pady=(6, 2))
+        console_header.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(console_header, text="▸ Live Console",
+                      font=ctk.CTkFont("Consolas", 10, "bold"),
+                      text_color=COLORS["accent"]).grid(row=0, column=0, sticky="w")
+
+        self._console_clear_btn = ctk.CTkButton(
+            console_header, text="Effacer", font=ctk.CTkFont("Consolas", 9),
+            fg_color="transparent", text_color=COLORS["text_dim"],
+            hover_color=COLORS["border"], height=20, width=55,
+            command=self._clear_console
+        )
+        self._console_clear_btn.grid(row=0, column=1, sticky="e")
+
+        import tkinter as _tk
+        self._console = _tk.Text(
+            console_frame,
+            height=5, font=("Consolas", 9),
+            bg=COLORS["bg_dark"], fg=COLORS["text_dim"],
+            insertbackground=COLORS["accent"],
+            relief="flat", bd=0, state="disabled",
+            selectbackground=COLORS["border"]
+        )
+        self._console.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 8))
+        self._console.tag_config("ok", foreground=COLORS["success"])
+        self._console.tag_config("err", foreground=COLORS["danger"])
+        self._console.tag_config("info", foreground=COLORS["accent"])
+        self._console.tag_config("warn", foreground=COLORS["warning"])
+        self._console.tag_config("dim", foreground=COLORS["text_dim"])
+
+        self.progress = ctk.CTkProgressBar(self, fg_color=COLORS["bg_panel"],
+                                            progress_color=COLORS["accent"], height=3)
+        self.progress.grid(row=1, column=0, sticky="sew", padx=0)
+        self.progress.set(0)
+        self.progress.grid_remove()
+
+        self.scroll = ctk.CTkScrollableFrame(self, fg_color=COLORS["bg_dark"])
+        self.scroll.grid(row=2, column=0, sticky="nsew", padx=0, pady=0)
+        self.scroll.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(self.scroll, text="Aucune recherche effectuée.",
+                      font=ctk.CTkFont(size=12), text_color=COLORS["text_dim"]).grid(
+            row=0, column=0, padx=20, pady=40)
+
+    def _log(self, message: str, level: str = "dim"):
+        ts = datetime.now().strftime("%H:%M:%S")
+        self._console.configure(state="normal")
+        self._console.insert("end", f"[{ts}] ", "dim")
+        self._console.insert("end", message + "\n", level)
+        self._console.see("end")
+        self._console.configure(state="disabled")
+
+    def _clear_console(self):
+        self._console.configure(state="normal")
+        self._console.delete("1.0", "end")
+        self._console.configure(state="disabled")
+
+    def start_search(self, dork: str, engines: list[str] | None, max_results: int):
+        self._current_dork = dork
+        self.dork_label.configure(text=f"Dork : {dork[:120]}{'...' if len(dork) > 120 else ''}")
+        self.app.search_results = {}
+
+        for w in self.scroll.winfo_children():
+            w.destroy()
+
+        self.progress.grid()
+        self.progress.configure(mode="indeterminate")
+        self.progress.start()
+
+        target_engines = engines or ["DuckDuckGo"]
+        self._log(f"Lancement — moteurs : {', '.join(target_engines)}", "info")
+        self._log(f"Dork : {dork[:100]}", "dim")
+
+        threading.Thread(
+            target=self._do_search,
+            args=(dork, engines, max_results),
+            daemon=True
+        ).start()
+
+    def _do_search(self, dork: str, engines: list[str] | None, max_results: int):
+        try:
+            results = self.app.engine.search(
+                dork,
+                engines=engines,
+                max_results=max_results,
+                on_result=lambda name, res, error=None: self.after(
+                    0, lambda n=name, r=res, e=error: self._on_partial(n, r, e)
+                )
+            )
+            self.app.search_results = results
+            self.after(0, self._on_complete)
+        except Exception as e:
+            self.after(0, lambda: self._on_error(str(e)))
+
+    def _on_partial(self, engine_name: str, results: list, error: str = None):
+        if error:
+            self._log(f"{engine_name} — erreur : {error}", "err")
+        else:
+            count = len(results)
+            level = "ok" if count > 0 else "warn"
+            self._log(f"{engine_name} — {count} résultat(s) reçu(s)", level)
+
+    def _on_complete(self):
+        self.progress.stop()
+        self.progress.grid_remove()
+
+        results = self.app.search_results
+        total = sum(len(v) for v in results.values())
+        self._log(f"Terminé — {total} résultat(s) au total", "ok" if total > 0 else "warn")
+
+        for w in self.scroll.winfo_children():
+            w.destroy()
+
+        summary = ctk.CTkLabel(self.scroll, text=f"{total} résultats trouvés",
+                                font=ctk.CTkFont("Consolas", 14, "bold"),
+                                text_color=COLORS["success"] if total > 0 else COLORS["text_dim"])
+        summary.grid(row=0, column=0, padx=20, pady=(15, 5), sticky="w")
+
+        if total == 0:
+            ctk.CTkLabel(self.scroll, text="Aucun résultat. Essayez un autre moteur ou modifiez votre dork.",
+                          font=ctk.CTkFont(size=11), text_color=COLORS["text_dim"]).grid(
+                row=1, column=0, padx=20, pady=20)
+            return
+
+        row = 1
+        for engine_name, items in results.items():
+            if not items:
+                continue
+
+            ctk.CTkLabel(self.scroll, text=f"── {engine_name} ({len(items)}) ──",
+                          font=ctk.CTkFont("Consolas", 12, "bold"),
+                          text_color=COLORS["accent2"]).grid(
+                row=row, column=0, padx=20, pady=(12, 4), sticky="w")
+            row += 1
+
+            for r in items:
+                card = ctk.CTkFrame(self.scroll, fg_color=COLORS["bg_card"], corner_radius=6)
+                card.grid(row=row, column=0, padx=20, pady=2, sticky="ew")
+                card.grid_columnconfigure(0, weight=1)
+
+                title = r.title or "(sans titre)"
+                ctk.CTkLabel(card, text=title[:120], font=ctk.CTkFont("Consolas", 11, "bold"),
+                              text_color=COLORS["text"]).grid(row=0, column=0, padx=12, pady=(8, 2), sticky="w")
+
+                url_label = ctk.CTkLabel(card, text=r.url[:120],
+                                          font=ctk.CTkFont("Consolas", 9),
+                                          text_color=COLORS["accent"],
+                                          cursor="hand2")
+                url_label.grid(row=1, column=0, padx=12, pady=1, sticky="w")
+                url_label.bind("<Button-1>", lambda e, u=r.url: webbrowser.open(u))
+
+                if r.snippet:
+                    snippet = r.snippet[:250] + "..." if len(r.snippet) > 250 else r.snippet
+                    ctk.CTkLabel(card, text=snippet, font=ctk.CTkFont(size=9),
+                                  text_color=COLORS["text_dim"], wraplength=800,
+                                  justify="left").grid(row=2, column=0, padx=12, pady=(0, 8), sticky="w")
+                row += 1
+
+    def _on_error(self, error: str):
+        self.progress.stop()
+        self.progress.grid_remove()
+        self._log(f"Erreur fatale : {error}", "err")
+        for w in self.scroll.winfo_children():
+            w.destroy()
+        ctk.CTkLabel(self.scroll, text=f"Erreur : {error}",
+                      font=ctk.CTkFont(size=11), text_color=COLORS["danger"]).grid(
+            row=0, column=0, padx=20, pady=40)
+
+    def _open_browser(self, engine_key: str):
+        """Ouvre la requête dans le navigateur réel — garantit une vue identique à un humain."""
+        if not self._current_dork:
+            messagebox.showinfo("Aucun dork", "Effectuez d'abord une recherche.")
+            return
+        from core.search_engine import open_in_browser
+        url = open_in_browser(self._current_dork, engine_key)
+        self._log(f"Ouvert dans le navigateur ({engine_key}) : {url[:80]}", "info")
+
+    def _export(self, fmt: str):
+        results = self.app.search_results
+        if not results and fmt != "html":
+            messagebox.showinfo("Pas de résultats", "Effectuez d'abord une recherche.")
+            return
+
+        ts  = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ext = "html" if fmt == "html" else fmt
+        type_label = "HTML" if fmt == "html" else fmt.upper()
+
+        path = filedialog.asksaveasfilename(
+            defaultextension=f".{ext}",
+            filetypes=[(type_label, f"*.{ext}")],
+            initialfile=f"dorking_results_{ts}.{ext}",
+            initialdir=self.app.config.export_dir
+        )
+        if not path:
+            return
+        try:
+            meta = {"dork": self._current_dork, "date": datetime.now().isoformat()}
+            if fmt == "json":
+                export_json(results, path, meta)
+            elif fmt == "csv":
+                export_csv(results, path)
+            elif fmt == "pdf":
+                export_pdf(results, path, self._current_dork, meta)
+            elif fmt == "html":
+                # Construit les données dork depuis les résultats actuels
+                dork_data = [{
+                    "dork":        self._current_dork,
+                    "description": f"{sum(len(v) for v in results.values())} résultats trouvés",
+                    "severity":    "INFO",
+                    "category":    "Résultats de recherche",
+                }]
+                save_smart_redirector(dork_data, path,
+                                      title="Rapport d'Audit OSINT",
+                                      engines=["Google", "Bing", "DuckDuckGo", "Shodan"])
+                import webbrowser as _wb
+                _wb.open(f"file:///{path.replace(os.sep, '/')}")
+            messagebox.showinfo("Export réussi", f"Fichier sauvegardé :\n{path}")
+        except Exception as e:
+            messagebox.showerror("Erreur export", str(e))
+
+
+class WikiFrame(ctk.CTkFrame):
+    """Wiki interactif — documentation complète des opérateurs Google Dork."""
+
+    _CONTENT = [
+        {
+            "id": "scope",
+            "title": "Opérateurs de portée",
+            "color": "#00D4FF", "icon": "🎯",
+            "intro": "Restreignent les résultats à un domaine, sous-domaine, TLD ou type de fichier.",
+            "entries": [
+                {
+                    "op": "site:",
+                    "syntax": "site:domaine.com",
+                    "desc": "Limite les résultats au domaine ou sous-domaine indiqué. Pas d'espace après ':'.",
+                    "examples": [
+                        ("Tout un domaine",         "site:example.com"),
+                        ("Sous-domaine spécifique", "site:admin.example.com"),
+                        ("Exclure le www",          "site:example.com -site:www.example.com"),
+                        ("Documents .gouv exposés", 'site:.gouv.fr filetype:xls "confidentiel"'),
+                    ],
+                    "tip": "Cartographier les sous-domaines : site:*.target.com — Google liste souvent des sous-domaines non référencés.",
+                },
+                {
+                    "op": "filetype: / ext:",
+                    "syntax": "filetype:pdf",
+                    "desc": "Filtre par extension de fichier. ext: est un alias strict. Cumulable avec OR pour plusieurs extensions.",
+                    "examples": [
+                        ("Backups SQL exposés",    'filetype:sql "password"'),
+                        ("Fichiers .env",          "filetype:env DB_PASSWORD"),
+                        ("Groupe OR de types",     "filetype:xls OR filetype:xlsx OR filetype:csv"),
+                        ("Documents d'un site",    "site:example.com filetype:pdf"),
+                    ],
+                    "tip": "Extensions à fort potentiel OSINT : sql, env, log, bak, conf, cfg, xml, yaml, key, pem.",
+                },
+                {
+                    "op": "cache:",
+                    "syntax": "cache:url.com",
+                    "desc": "Affiche la copie en cache Google d'une URL. Utile pour voir du contenu supprimé ou modifié récemment.",
+                    "examples": [
+                        ("Cache d'une page login", "cache:example.com/login"),
+                        ("Cache avec recherche",   "cache:example.com password"),
+                    ],
+                    "tip": "Si une page a été retirée après une fuite de données, le cache peut en conserver une copie pendant des semaines.",
+                },
+                {
+                    "op": "related:",
+                    "syntax": "related:domaine.com",
+                    "desc": "Trouve les sites que Google considère similaires ou liés au domaine indiqué.",
+                    "examples": [
+                        ("Concurrents directs",    "related:github.com"),
+                        ("Filiales probables",     "related:target-company.com"),
+                    ],
+                    "tip": "Utile pour identifier les filiales, partenaires ou prestataires d'une cible dans un audit OSINT.",
+                },
+                {
+                    "op": "info:",
+                    "syntax": "info:domaine.com",
+                    "desc": "Affiche les informations que Google a indexées sur une URL : cache, pages similaires, liens entrants.",
+                    "examples": [
+                        ("Infos sur un domaine",   "info:example.com"),
+                        ("Infos sur une page",     "info:example.com/admin"),
+                    ],
+                    "tip": "Sert de point de départ pour explorer ce que Google sait d'une cible avant d'affiner avec d'autres opérateurs.",
+                },
+            ],
+        },
+        {
+            "id": "content",
+            "title": "Opérateurs de contenu",
+            "color": "#A855F7", "icon": "📄",
+            "intro": "Ciblent le contenu dans le titre HTML, l'URL ou le corps de la page.",
+            "entries": [
+                {
+                    "op": "intitle:",
+                    "syntax": "intitle:texte",
+                    "desc": "Recherche le texte dans la balise <title> de la page. allintitle: impose que TOUS les mots y soient présents.",
+                    "examples": [
+                        ("Panneaux admin",          'intitle:"admin panel"'),
+                        ("Pages de login",          'intitle:"login" site:example.com'),
+                        ("Index de répertoires",    'intitle:"index of" "parent directory"'),
+                        ("Caméras IP AXIS",         'intitle:"Live View / - AXIS"'),
+                    ],
+                    "tip": 'intitle:"index of" est l\'une des techniques les plus puissantes : elle détecte les serveurs avec directory listing actif.',
+                },
+                {
+                    "op": "inurl:",
+                    "syntax": "inurl:chemin",
+                    "desc": "Recherche le texte dans l'URL de la page. Correspondance partielle. allinurl: impose tous les termes.",
+                    "examples": [
+                        ("Panels d'administration", "inurl:admin"),
+                        ("Pages de config PHP",     "inurl:config.php"),
+                        ("APIs exposées",           'inurl:"/api/v1/" site:example.com'),
+                        ("phpMyAdmin",              'inurl:phpmyadmin intitle:"phpMyAdmin"'),
+                    ],
+                    "tip": "inurl: cherche une correspondance partielle dans toute l'URL. Mettez entre guillemets pour forcer le chemin exact.",
+                },
+                {
+                    "op": "intext:",
+                    "syntax": "intext:texte",
+                    "desc": "Recherche le texte dans le corps de la page (hors titre et URL). allintext: impose tous les termes.",
+                    "examples": [
+                        ("Credentials exposés",     'intext:"password=" intext:"username="'),
+                        ("Clés API dans le code",   'intext:"api_key" site:example.com'),
+                        ("Erreurs MySQL",            'intext:"SQL syntax" intext:"mysql_fetch"'),
+                        ("Stack traces",             'intext:"Exception in thread" filetype:log'),
+                    ],
+                    "tip": "Combinez intext: avec site: pour auditer le contenu d'un domaine spécifique sans bruit externe.",
+                },
+                {
+                    "op": "inanchor:",
+                    "syntax": "inanchor:texte",
+                    "desc": "Recherche le texte dans les ancres de liens (<a href=...>texte</a>) pointant vers une page.",
+                    "examples": [
+                        ("Liens vers login",        'inanchor:"login" site:example.com'),
+                        ("Backlinks avec mot-clé",  'inanchor:"download" filetype:zip'),
+                    ],
+                    "tip": "Moins utilisé mais utile pour cartographier les liens internes d'un site ou trouver des pages peu visibles.",
+                },
+            ],
+        },
+        {
+            "id": "logic",
+            "title": "Logique & Syntaxe",
+            "color": "#FFD700", "icon": "⚙️",
+            "intro": "Modificateurs logiques pour combiner, exclure et préciser les requêtes.",
+            "entries": [
+                {
+                    "op": '"phrase exacte"',
+                    "syntax": '"mot1 mot2 mot3"',
+                    "desc": "Force la recherche de la séquence exacte de mots. Indispensable pour chercher des patterns de sécurité précis.",
+                    "examples": [
+                        ("Clé privée RSA",          '"-----BEGIN RSA PRIVATE KEY-----"'),
+                        ("Header Authorization",    '"Authorization: Bearer" site:example.com'),
+                        ("Message d\'erreur exact", '"ORA-00933: SQL command not properly ended"'),
+                        ("Credentials dans logs",   '"username" "password" filetype:log'),
+                    ],
+                    "tip": "La phrase exacte est l'outil n°1 pour les patterns de sécurité : tokens, clés, messages d'erreur, headers HTTP.",
+                },
+                {
+                    "op": "- (NOT / exclusion)",
+                    "syntax": "-terme  ou  -site:domaine",
+                    "desc": "Exclut les résultats contenant ce terme ou provenant de ce domaine. S'applique à n'importe quel opérateur.",
+                    "examples": [
+                        ("Exclure un domaine",      "inurl:admin -site:example.com"),
+                        ("Éliminer les exemples",   "filetype:env -intext:sample -intext:example"),
+                        ("Affiner les index",       'intitle:"index of" -intext:"This site"'),
+                        ("Exclure les wikis",       'filetype:sql "password" -site:github.com'),
+                    ],
+                    "tip": "Enchaînez plusieurs exclusions pour éliminer les faux positifs. Très efficace combiné avec filetype: ou site:.",
+                },
+                {
+                    "op": "OR",
+                    "syntax": "terme1 OR terme2",
+                    "desc": "Retourne les résultats contenant l'un OU l'autre terme. Le symbole | est un alias de OR.",
+                    "examples": [
+                        ("Multi-extensions",        "filetype:sql OR filetype:db OR filetype:sqlite"),
+                        ("Multi-chemins admin",     "inurl:admin OR inurl:administrator OR inurl:wp-admin"),
+                        ("Variantes de secrets",    'site:example.com "passwd" OR "password" OR "credentials"'),
+                    ],
+                    "tip": "Groupez les OR entre parenthèses pour les combiner proprement : (filetype:sql OR filetype:db) site:example.com",
+                },
+                {
+                    "op": "AROUND(N)",
+                    "syntax": "mot1 AROUND(N) mot2",
+                    "desc": "Les deux mots doivent apparaître à moins de N mots l'un de l'autre dans le texte. N est un entier.",
+                    "examples": [
+                        ("Credentials proches",     "password AROUND(3) username"),
+                        ("CVE dans contexte",        "vulnerability AROUND(5) CVE"),
+                        ("Secrets de config",        "secret AROUND(4) key"),
+                    ],
+                    "tip": "N=3 à 5 est optimal. Plus N est petit, plus le résultat est ciblé. N > 10 revient presque à une recherche libre.",
+                },
+                {
+                    "op": "* (wildcard)",
+                    "syntax": '"mot * mot"',
+                    "desc": "Dans une phrase exacte entre guillemets, * remplace exactement un mot inconnu.",
+                    "examples": [
+                        ("Token Bearer variable",   '"Bearer *" site:example.com'),
+                        ("Variable d\'environnement",'filetype:env "DB_* ="'),
+                        ("Titre de panel variable", 'intitle:"* admin panel"'),
+                    ],
+                    "tip": "Le wildcard * ne fonctionne QUE dans les guillemets. En dehors, Google l'ignore complètement.",
+                },
+            ],
+        },
+        {
+            "id": "advanced",
+            "title": "Techniques avancées",
+            "color": "#FF6B35", "icon": "🔬",
+            "intro": "Patterns éprouvés pour l'audit de sécurité et la reconnaissance OSINT.",
+            "entries": [
+                {
+                    "op": "Directory listing",
+                    "syntax": 'intitle:"index of"',
+                    "desc": "Détecte les serveurs web avec le listing de répertoires activé (misconfiguration critique).",
+                    "examples": [
+                        ("Répertoires ouverts",     'intitle:"index of" site:example.com'),
+                        ("Backups exposés",          'intitle:"index of" "backup" OR ".bak"'),
+                        ("Logs accessibles",         'intitle:"index of" "access.log" OR "error.log"'),
+                        ("Clés et certificats",      'intitle:"index of" ".key" OR ".pem" OR ".crt"'),
+                    ],
+                    "tip": "Un directory listing non intentionnel expose TOUT le contenu du répertoire. C'est une misconfiguration critique souvent présente.",
+                },
+                {
+                    "op": "Fichiers de config",
+                    "syntax": "filetype:env OR filetype:yml",
+                    "desc": "Trouve les fichiers de configuration exposés : credentials, tokens API, URLs de base de données.",
+                    "examples": [
+                        ("Fichiers .env",            'filetype:env "DB_PASSWORD" OR "SECRET_KEY"'),
+                        ("Configs PHP",              'filetype:php intext:"define(" intext:"password"'),
+                        ("YAML avec secrets",        'filetype:yaml "password:" OR "secret:" OR "token:"'),
+                        ("Fichiers .htpasswd",       "filetype:htpasswd"),
+                    ],
+                    "tip": ".env, .htpasswd, wp-config.php et database.yml sont les fichiers les plus souvent mal protégés sur des hébergements partagés.",
+                },
+                {
+                    "op": "Panneaux d'admin",
+                    "syntax": 'inurl:admin intitle:"login"',
+                    "desc": "Localise les interfaces d'administration et portails d'accès exposés sur un domaine cible.",
+                    "examples": [
+                        ("Admin générique",          'site:target.com inurl:admin intitle:"login"'),
+                        ("phpMyAdmin",               'inurl:phpmyadmin intitle:"phpMyAdmin"'),
+                        ("Panels WordPress",         "inurl:wp-admin site:target.com"),
+                        ("Portail Apache Tomcat",    'intitle:"Apache Tomcat" inurl:manager'),
+                    ],
+                    "tip": "Remplacez target.com par votre cible. Vérifiez toujours une autorisation écrite avant tout test d'accès.",
+                },
+                {
+                    "op": "Secrets & clés exposés",
+                    "syntax": '"api_key" filetype:env',
+                    "desc": "Détecte des patterns caractéristiques de clés API, tokens OAuth et secrets dans des fichiers indexés.",
+                    "examples": [
+                        ("Clé privée RSA",           '"-----BEGIN RSA PRIVATE KEY-----"'),
+                        ("AWS Access Key",           '"AKIA" filetype:env OR filetype:yml'),
+                        ("Tokens GitHub",            '"ghp_" OR "github_pat_" filetype:env'),
+                        ("Clés génériques en JS",   'intext:"api_key" filetype:js site:target.com'),
+                    ],
+                    "tip": "Ces patterns fonctionnent aussi sur GitHub avec site:github.com — les développeurs commitent régulièrement des secrets par erreur.",
+                },
+                {
+                    "op": "Caméras & IoT",
+                    "syntax": 'intitle:"Live View"',
+                    "desc": "Trouve des interfaces d'équipements réseau, caméras IP et systèmes industriels exposés sans authentification.",
+                    "examples": [
+                        ("Caméras AXIS",             'intitle:"Live View / - AXIS"'),
+                        ("Interfaces Cisco",         'intitle:"Cisco" inurl:main.html'),
+                        ("Routeurs Netgear",         'intitle:"NETGEAR" inurl:basicsecurity.htm'),
+                        ("Imprimantes HP",           'intitle:"HP LaserJet" inurl:info_configuration.htm'),
+                    ],
+                    "tip": "Ces équipements sont souvent accessibles directement depuis Internet avec les credentials par défaut. Signalez via responsible disclosure.",
+                },
+            ],
+        },
+        {
+            "id": "recipes",
+            "title": "Recettes OSINT",
+            "color": "#00FF88", "icon": "🧪",
+            "intro": "Dorks prêts à l'emploi pour les scénarios d'audit les plus courants. Remplacez target.com par votre cible.",
+            "entries": [
+                {
+                    "op": "Audit WordPress",
+                    "syntax": "site:target.com inurl:wp-",
+                    "desc": "Cartographier une installation WordPress : fichiers de config, plugins, backups, uploads non protégés.",
+                    "examples": [
+                        ("Config exposée",           "site:target.com inurl:wp-config.php"),
+                        ("Liste des plugins",        "site:target.com inurl:wp-content/plugins"),
+                        ("Backups WordPress",        'site:target.com filetype:sql "WordPress"'),
+                        ("Uploads PHP",              "site:target.com inurl:wp-content/uploads filetype:php"),
+                    ],
+                    "tip": "wp-config.php.bak est souvent laissé après migration. wp-content/uploads ne devrait jamais contenir de .php.",
+                },
+                {
+                    "op": "Reconnaissance infra",
+                    "syntax": "site:*.target.com",
+                    "desc": "Cartographier la surface d'attaque : sous-domaines, technologies, portails d'accès, documents publics.",
+                    "examples": [
+                        ("Tous les sous-domaines",   "site:*.target.com"),
+                        ("Portails d'accès distant", "site:target.com inurl:vpn OR inurl:citrix OR inurl:rdweb"),
+                        ("Technologies détectées",   'site:target.com intitle:"Apache" OR intitle:"nginx" OR intitle:"IIS"'),
+                        ("Documents publics",        "site:target.com filetype:pdf OR filetype:docx"),
+                    ],
+                    "tip": "Commencez toujours par site:*.target.com pour cartographier la surface d'attaque avant d'affiner.",
+                },
+                {
+                    "op": "Fuites de données RH",
+                    "syntax": '"@target.com" filetype:xls',
+                    "desc": "Trouver des emails, listes d'employés et documents internes dans des fichiers exposés.",
+                    "examples": [
+                        ("Emails dans tableurs",     '"@target.com" filetype:xls OR filetype:csv'),
+                        ("CV et profils exposés",    'site:target.com filetype:pdf "curriculum vitae" OR "resume"'),
+                        ("Organigrammes",            'site:target.com filetype:pdf "organigramme" OR "org chart"'),
+                        ("Comptes LinkedIn",         'site:linkedin.com/in "target company"'),
+                    ],
+                    "tip": "Les fichiers RH et commerciaux sont souvent uploadés sans contrôle d'accès. Les tableurs contiennent fréquemment des emails et numéros.",
+                },
+                {
+                    "op": "Erreurs & logs exposés",
+                    "syntax": "filetype:log site:target.com",
+                    "desc": "Détecter les fichiers de log et messages d'erreur qui révèlent la stack technique interne.",
+                    "examples": [
+                        ("Logs d'accès Apache",      'site:target.com filetype:log "access.log"'),
+                        ("Stack traces Java",        'site:target.com intext:"Exception in thread" intext:"java"'),
+                        ("Debug Django actif",       'site:target.com intext:"DEBUG = True" intext:"Django"'),
+                        ("Erreurs PHP fatales",      'site:target.com intext:"Fatal error" intext:"on line"'),
+                    ],
+                    "tip": "Les stack traces révèlent la version exacte des frameworks, simplifiant la recherche de CVEs associés.",
+                },
+                {
+                    "op": "Données sensibles type",
+                    "syntax": '"confidential" filetype:pdf',
+                    "desc": "Trouver des documents marqués confidentiels, des rapports internes ou des données à accès restreint indexés.",
+                    "examples": [
+                        ("Docs confidentiels",       'site:target.com filetype:pdf "confidentiel" OR "confidential"'),
+                        ("Rapports financiers",      'site:target.com filetype:xls "budget" OR "forecast" OR "P&L"'),
+                        ("Contrats exposés",         'site:target.com filetype:pdf "contrat" OR "agreement" OR "NDA"'),
+                        ("Données personnelles",     'site:target.com filetype:csv "nom" "prénom" "email"'),
+                    ],
+                    "tip": "Ces fichiers sont souvent dans des répertoires publics uploadés par erreur. Signalez la fuite à l'organisation concernée.",
+                },
+            ],
+        },
+    ]
+
+    def __init__(self, parent, app: "DorkingApp"):
+        super().__init__(parent, fg_color=COLORS["bg_dark"])
+        self.app = app
+        self._active_section = "all"
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(2, weight=1)
+        self._build()
+
+    def _build(self):
+        # ── En-tête ──────────────────────────────────────────────────────
+        header = ctk.CTkFrame(self, fg_color=COLORS["bg_panel"])
+        header.grid(row=0, column=0, sticky="ew")
+        header.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(header, text="📖 Wiki — Référence des Opérateurs",
+                      font=ctk.CTkFont("Consolas", 22, "bold"),
+                      text_color=COLORS["accent"]).grid(
+            row=0, column=0, padx=20, pady=(15, 2), sticky="w")
+        ctk.CTkLabel(header,
+                      text="Documentation complète avec exemples pratiques, recettes OSINT et boutons Try",
+                      font=ctk.CTkFont(size=12), text_color=COLORS["text_dim"]).grid(
+            row=1, column=0, padx=20, pady=(0, 10), sticky="w")
+
+        self._search_var = ctk.StringVar()
+        ctk.CTkEntry(header, textvariable=self._search_var,
+                      placeholder_text="Rechercher un opérateur, technique, exemple...",
+                      fg_color=COLORS["bg_input"], border_color=COLORS["border"],
+                      text_color=COLORS["text"], height=34, width=340).grid(
+            row=0, column=1, padx=20, pady=(15, 2), rowspan=2, sticky="e")
+        self._search_var.trace_add("write", lambda *_: self._render())
+
+        # ── Onglets de sections ───────────────────────────────────────────
+        tabs_frame = ctk.CTkFrame(self, fg_color=COLORS["bg_panel"])
+        tabs_frame.grid(row=1, column=0, sticky="ew")
+        tabs_inner = ctk.CTkFrame(tabs_frame, fg_color="transparent")
+        tabs_inner.pack(side="left", padx=16, pady=8)
+
+        self._tab_btns: dict[str, tuple] = {}
+        sections_nav = [("all", "  Tout  ", "#888888")] + [
+            (s["id"], f" {s['icon']} {s['title']} ", s["color"])
+            for s in self._CONTENT
+        ]
+        for sid, label, color in sections_nav:
+            active = sid == "all"
+            btn = ctk.CTkButton(
+                tabs_inner, text=label,
+                font=ctk.CTkFont("Consolas", 10),
+                fg_color=COLORS["bg_card"] if active else "transparent",
+                text_color=COLORS["accent"] if active else COLORS["text_dim"],
+                hover_color=COLORS["bg_card"],
+                height=28, corner_radius=4,
+                command=lambda s=sid: self._select(s)
+            )
+            btn.pack(side="left", padx=(0, 4))
+            self._tab_btns[sid] = (btn, color)
+
+        # ── Zone scrollable ───────────────────────────────────────────────
+        self._scroll = ctk.CTkScrollableFrame(self, fg_color=COLORS["bg_dark"])
+        self._scroll.grid(row=2, column=0, sticky="nsew")
+        self._scroll.grid_columnconfigure(0, weight=1)
+        self._render()
+
+    def _select(self, section_id: str):
+        self._active_section = section_id
+        self._search_var.set("")
+        for sid, (btn, _) in self._tab_btns.items():
+            active = sid == section_id
+            btn.configure(
+                fg_color=COLORS["bg_card"] if active else "transparent",
+                text_color=COLORS["accent"] if active else COLORS["text_dim"],
+            )
+        self._render()
+
+    def _render(self):
+        for w in self._scroll.winfo_children():
+            w.destroy()
+        q = self._search_var.get().strip().lower()
+        row = 0
+
+        for section in self._CONTENT:
+            if self._active_section not in ("all", section["id"]):
+                continue
+            entries = section["entries"]
+            if q:
+                entries = [
+                    e for e in entries
+                    if q in e["op"].lower()
+                    or q in e.get("desc", "").lower()
+                    or any(q in ex.lower() for _, ex in e.get("examples", []))
+                    or q in e.get("tip", "").lower()
+                ]
+            if not entries:
+                continue
+
+            # En-tête de section
+            sh = ctk.CTkFrame(self._scroll, fg_color="transparent")
+            sh.grid(row=row, column=0, padx=20, pady=(22, 4), sticky="ew")
+            sh.grid_columnconfigure(1, weight=1)
+            ctk.CTkLabel(sh, text=f"  {section['icon']} {section['title']}  ",
+                          font=ctk.CTkFont("Consolas", 13, "bold"),
+                          fg_color=section["color"], text_color="#000000",
+                          corner_radius=4).grid(row=0, column=0, sticky="w")
+            ctk.CTkFrame(sh, height=1, fg_color=COLORS["border"]).grid(
+                row=0, column=1, padx=(12, 0), sticky="ew")
+            row += 1
+
+            if section.get("intro") and not q:
+                ctk.CTkLabel(self._scroll, text=section["intro"],
+                              font=ctk.CTkFont(size=11), text_color=COLORS["text_dim"],
+                              wraplength=960, justify="left").grid(
+                    row=row, column=0, padx=24, pady=(0, 8), sticky="w")
+                row += 1
+
+            for entry in entries:
+                self._entry_card(row, entry, section["color"])
+                row += 1
+
+        if row == 0:
+            ctk.CTkLabel(self._scroll, text="Aucun résultat pour cette recherche.",
+                          font=ctk.CTkFont(size=12), text_color=COLORS["text_dim"]).grid(
+                row=0, column=0, padx=20, pady=60)
+
+    def _entry_card(self, row: int, entry: dict, color: str):
+        card = ctk.CTkFrame(self._scroll, fg_color=COLORS["bg_card"],
+                             corner_radius=8, border_width=1, border_color=COLORS["border"])
+        card.grid(row=row, column=0, padx=20, pady=5, sticky="ew")
+        card.grid_columnconfigure(1, weight=1)
+
+        # Badge gauche
+        badge = ctk.CTkFrame(card, fg_color=COLORS["bg_input"], corner_radius=6, width=195)
+        badge.grid(row=0, column=0, rowspan=3, padx=(12, 8), pady=14, sticky="n")
+        badge.grid_propagate(False)
+        ctk.CTkLabel(badge, text=entry["op"],
+                      font=ctk.CTkFont("Consolas", 11, "bold"),
+                      text_color=color, wraplength=178,
+                      justify="center").pack(padx=6, pady=(10, 3))
+        ctk.CTkLabel(badge, text=entry["syntax"],
+                      font=ctk.CTkFont("Consolas", 9),
+                      text_color=COLORS["text_dim"],
+                      wraplength=178, justify="center").pack(padx=6, pady=(0, 10))
+
+        # Description
+        ctk.CTkLabel(card, text=entry["desc"],
+                      font=ctk.CTkFont(size=12), text_color=COLORS["text"],
+                      wraplength=740, justify="left").grid(
+            row=0, column=1, padx=(0, 14), pady=(14, 6), sticky="w")
+
+        # Exemples
+        if entry.get("examples"):
+            ex_wrap = ctk.CTkFrame(card, fg_color="transparent")
+            ex_wrap.grid(row=1, column=1, padx=(0, 14), pady=(0, 4), sticky="ew")
+            ex_wrap.grid_columnconfigure(0, weight=1)
+            for label, code in entry["examples"]:
+                row_f = ctk.CTkFrame(ex_wrap, fg_color=COLORS["bg_dark"], corner_radius=4)
+                row_f.pack(fill="x", pady=2)
+                ctk.CTkLabel(row_f, text=f"  {label}",
+                              font=ctk.CTkFont(size=9), text_color=COLORS["text_dim"],
+                              width=168, anchor="w").pack(side="left")
+                ctk.CTkLabel(row_f, text=code,
+                              font=ctk.CTkFont("Consolas", 10), text_color=COLORS["accent"],
+                              anchor="w").pack(side="left", padx=8, fill="x", expand=True)
+                ctk.CTkButton(row_f, text="↗ Try",
+                               font=ctk.CTkFont("Consolas", 9),
+                               fg_color="transparent", text_color=color,
+                               hover_color=COLORS["border"], height=22, width=55,
+                               command=lambda c=code: self._try(c)).pack(side="right", padx=4, pady=2)
+
+        # Tip OSINT
+        if entry.get("tip"):
+            tip = ctk.CTkFrame(card, fg_color="#0D1A0D", corner_radius=4)
+            tip.grid(row=2, column=1, padx=(0, 14), pady=(0, 14), sticky="ew")
+            ctk.CTkLabel(tip, text="💡  " + entry["tip"],
+                          font=ctk.CTkFont(size=10), text_color="#88CC88",
+                          wraplength=730, justify="left").pack(padx=10, pady=7, anchor="w")
+
+    def _try(self, code: str):
+        self.app.frames["builder"].query_var.set(code)
+        self.app._show_tab("builder")
+
+
+class SettingsFrame(ctk.CTkFrame):
+    def __init__(self, parent, app: DorkingApp):
+        super().__init__(parent, fg_color=COLORS["bg_dark"])
+        self.app = app
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
+        self._build()
+
+    def _build(self):
+        header = ctk.CTkFrame(self, fg_color=COLORS["bg_panel"])
+        header.grid(row=0, column=0, sticky="ew")
+        ctk.CTkLabel(header, text="⚙️ Paramètres",
+                      font=ctk.CTkFont("Consolas", 22, "bold"),
+                      text_color=COLORS["accent"]).grid(row=0, column=0, padx=20, pady=(15, 2), sticky="w")
+        ctk.CTkLabel(header, text="Clés API et configuration",
+                      font=ctk.CTkFont(size=12), text_color=COLORS["text_dim"]).grid(
+            row=1, column=0, padx=20, pady=(0, 12), sticky="w")
+
+        scroll = ctk.CTkScrollableFrame(self, fg_color=COLORS["bg_dark"])
+        scroll.grid(row=1, column=0, sticky="nsew")
+        scroll.grid_columnconfigure(0, weight=1)
+
+        apis = [
+            ("Google CSE API Key", "google_api_key",
+             "Obtenez votre clé sur console.cloud.google.com (Custom Search API)"),
+            ("Google CSE ID (cx)", "google_cse_id",
+             "ID du moteur de recherche personnalisé (cx=...)"),
+            ("Bing API Key", "bing_api_key",
+             "Azure Cognitive Services > Bing Search v7"),
+            ("Shodan API Key", "shodan_api_key",
+             "account.shodan.io > My Account > API Key"),
+            ("Anthropic API Key", "anthropic_api_key",
+             "console.anthropic.com > API Keys (pour Dork Suggest IA)"),
+        ]
+
+        self.settings_vars = {}
+        for i, (label, key, hint) in enumerate(apis):
+            card = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"], corner_radius=8)
+            card.grid(row=i, column=0, padx=20, pady=6, sticky="ew")
+            card.grid_columnconfigure(1, weight=1)
+
+            ctk.CTkLabel(card, text=label, font=ctk.CTkFont("Consolas", 12, "bold"),
+                          text_color=COLORS["text"]).grid(row=0, column=0, columnspan=2,
+                                                          padx=15, pady=(10, 2), sticky="w")
+            ctk.CTkLabel(card, text=hint, font=ctk.CTkFont(size=9),
+                          text_color=COLORS["text_dim"]).grid(row=1, column=0, columnspan=2,
+                                                              padx=15, pady=(0, 4), sticky="w")
+            var = ctk.StringVar(value=getattr(self.app.config, key, ""))
+            entry = ctk.CTkEntry(card, textvariable=var, font=ctk.CTkFont("Consolas", 11),
+                                  fg_color=COLORS["bg_input"], border_color=COLORS["border"],
+                                  text_color=COLORS["text"], height=34, show="*" if "key" in key.lower() else "")
+            entry.grid(row=2, column=0, padx=15, pady=(0, 12), sticky="ew")
+
+            show_btn = ctk.CTkButton(card, text="👁", width=34, height=34,
+                                      fg_color=COLORS["bg_input"], text_color=COLORS["text"],
+                                      hover_color=COLORS["border"],
+                                      command=lambda e=entry: e.configure(show="" if e.cget("show") else "*"))
+            show_btn.grid(row=2, column=1, padx=(0, 15), pady=(0, 12), sticky="w")
+            self.settings_vars[key] = var
+
+        from core.config_manager import keyring_status
+        kr = keyring_status()
+        kr_color = COLORS["success"] if kr["available"] else COLORS["warning"]
+        kr_card = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"], corner_radius=8,
+                                border_color=kr_color, border_width=1)
+        kr_card.grid(row=len(apis), column=0, padx=20, pady=6, sticky="ew")
+        ctk.CTkLabel(kr_card, text="🔐 Sécurité des clés API",
+                      font=ctk.CTkFont("Consolas", 12, "bold"),
+                      text_color=COLORS["text"]).grid(row=0, column=0, padx=15, pady=(10, 4), sticky="w")
+        ctk.CTkLabel(kr_card, text=kr["message"],
+                      font=ctk.CTkFont(size=10), text_color=kr_color).grid(
+            row=1, column=0, padx=15, pady=(0, 10), sticky="w")
+
+        ctk.CTkButton(scroll, text="💾 Sauvegarder la configuration",
+                       font=ctk.CTkFont("Consolas", 13, "bold"),
+                       fg_color=COLORS["success"], text_color="#000000",
+                       hover_color="#00CC70", height=44,
+                       command=self._save).grid(row=len(apis) + 1, column=0, padx=20, pady=(10, 5), sticky="ew")
+
+        legal_card = ctk.CTkFrame(scroll, fg_color="#1A0A00", corner_radius=8,
+                                   border_color=COLORS["warning"], border_width=1)
+        legal_card.grid(row=len(apis) + 2, column=0, padx=20, pady=(10, 20), sticky="ew")
+
+        ctk.CTkLabel(legal_card, text="⚠️ Avertissement légal",
+                      font=ctk.CTkFont("Consolas", 12, "bold"),
+                      text_color=COLORS["warning"]).grid(row=0, column=0, padx=15, pady=(12, 4), sticky="w")
+
+        legal_text = (
+            "Cet outil est destiné exclusivement à la cybersécurité défensive, aux audits de sécurité "
+            "autorisés, et à la recherche OSINT légale.\n\n"
+            "L'utilisation de Google Dorks pour accéder à des données privées, des systèmes tiers "
+            "sans autorisation explicite, ou pour toute activité malveillante est ILLÉGALE et peut "
+            "entraîner des poursuites pénales (Computer Fraud and Abuse Act, loi Godfrain, RGPD).\n\n"
+            "Utilisez uniquement sur des systèmes dont vous êtes propriétaire ou pour lesquels "
+            "vous disposez d'une autorisation écrite."
+        )
+        ctk.CTkLabel(legal_card, text=legal_text, font=ctk.CTkFont(size=10),
+                      text_color=COLORS["text_dim"], wraplength=700, justify="left").grid(
+            row=1, column=0, padx=15, pady=(0, 15), sticky="w")
+
+    def _save(self):
+        for key, var in self.settings_vars.items():
+            setattr(self.app.config, key, var.get().strip())
+        save_config(self.app.config)
+        self.app._build_engine()
+        messagebox.showinfo("Sauvegardé", "Configuration sauvegardée. Les moteurs ont été rechargés.")

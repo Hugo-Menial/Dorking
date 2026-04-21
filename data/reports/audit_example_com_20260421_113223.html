@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Audit OSINT — example.com</title>
+<style>
+  :root {
+    --bg:       #0D0D0D;
+    --panel:    #141414;
+    --card:     #1A1A2E;
+    --input:    #1E1E2E;
+    --accent:   #00D4FF;
+    --accent2:  #FF6B35;
+    --accent3:  #A855F7;
+    --success:  #00FF88;
+    --text:     #E0E0E0;
+    --dim:      #888888;
+    --border:   #2A2A4A;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; }
+
+  header { background: var(--panel); padding: 24px 32px; border-bottom: 1px solid var(--border); }
+  header h1 { font-family: Consolas, monospace; font-size: 22px; color: var(--accent); }
+  header .meta { font-size: 12px; color: var(--dim); margin-top: 6px; }
+  .stats { display: flex; gap: 12px; margin-top: 14px; flex-wrap: wrap; }
+  .stat-badge {
+    border: 1px solid;
+    border-radius: 4px;
+    padding: 4px 12px;
+    font-size: 12px;
+    font-family: Consolas, monospace;
+  }
+
+  main { max-width: 1200px; margin: 0 auto; padding: 24px 20px; }
+
+  .wave-section { margin-bottom: 36px; }
+  .wave-header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 16px; background: var(--panel);
+    margin-bottom: 12px; border-radius: 4px;
+  }
+  .severity-badge {
+    font-family: Consolas, monospace; font-size: 11px; font-weight: bold;
+    padding: 3px 10px; border-radius: 3px;
+  }
+  .wave-label { color: var(--dim); font-size: 12px; }
+  .wave-count  { margin-left: auto; color: var(--dim); font-size: 12px; }
+
+  .dork-grid { display: flex; flex-direction: column; gap: 8px; }
+  .dork-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px 16px;
+  }
+  .dork-card:hover { border-color: var(--accent); }
+
+  .dork-header {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 8px;
+  }
+  .dork-num      { color: var(--dim); font-size: 11px; font-family: Consolas, monospace; min-width: 30px; }
+  .dork-category { color: var(--dim); font-size: 11px; flex: 1; }
+  .copy-btn {
+    background: transparent; border: 1px solid var(--border);
+    color: var(--dim); cursor: pointer; border-radius: 3px;
+    padding: 2px 8px; font-size: 12px;
+  }
+  .copy-btn:hover { background: var(--input); color: var(--text); }
+
+  code.dork-query {
+    display: block;
+    font-family: Consolas, monospace; font-size: 12px;
+    color: var(--accent);
+    background: var(--input);
+    padding: 8px 12px; border-radius: 4px;
+    word-break: break-all;
+    margin-bottom: 8px;
+  }
+  .dork-desc { font-size: 11px; color: var(--dim); margin-bottom: 10px; }
+
+  .engine-links { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+  .engine-btn {
+    text-decoration: none; font-size: 11px;
+    padding: 5px 14px; border-radius: 4px;
+    border: 1px solid var(--border);
+    color: var(--text); background: var(--input);
+    transition: background 0.15s;
+  }
+  .engine-btn:hover { background: var(--border); color: white; }
+  .engine-google     { border-color: #4285f4; color: #4285f4; }
+  .engine-bing       { border-color: #00A4EF; color: #00A4EF; }
+  .engine-duckduckgo { border-color: #DE5833; color: #DE5833; }
+  .engine-shodan     { border-color: #A855F7; color: #A855F7; }
+
+  .pagination { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+  .pagination { font-size: 10px; color: var(--dim); }
+  .page-link {
+    text-decoration: none; color: var(--dim);
+    border: 1px solid var(--border);
+    padding: 2px 7px; border-radius: 3px; font-size: 10px;
+    background: var(--input);
+  }
+  .page-link:hover { color: var(--accent); border-color: var(--accent); }
+
+  .copy-toast {
+    position: fixed; bottom: 20px; right: 20px;
+    background: var(--success); color: #000;
+    padding: 8px 18px; border-radius: 6px;
+    font-size: 13px; font-family: Consolas, monospace;
+    display: none; z-index: 9999;
+  }
+  footer {
+    text-align: center; padding: 20px;
+    font-size: 10px; color: var(--dim);
+    border-top: 1px solid var(--border);
+    margin-top: 40px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>◈ Audit OSINT — example.com</h1>
+  <div class="meta">
+    Généré le 21/04/2026 à 11:32:23 — Cible : <b>example.com</b>
+    &nbsp;|&nbsp; 3 dork(s) &nbsp;|&nbsp;
+    Moteurs : Google, Bing, DuckDuckGo, Shodan
+  </div>
+  <div class="stats"><span class="stat-badge" style="border-color:#FF4444"><b style="color:#FF4444">CRITIQUE</b> 1</span><span class="stat-badge" style="border-color:#FF6B35"><b style="color:#FF6B35">ÉLEVÉ</b> 1</span><span class="stat-badge" style="border-color:#FFD700"><b style="color:#FFD700">MOYEN</b> 1</span></div>
+</header>
+
+<main>
+
+<section class="wave-section">
+  <div class="wave-header" style="border-left: 4px solid #FF4444">
+    <span class="severity-badge" style="background:#FF4444;color:#000">CRITIQUE</span>
+    <span class="wave-label">Vague 1</span>
+    <span class="wave-count">1 dork(s)</span>
+  </div>
+  <div class="dork-grid">
+    
+<div class="dork-card" id="dork-1">
+  <div class="dork-header">
+    <span class="dork-num">#1</span>
+    <span class="dork-category"></span>
+    <button class="copy-btn" onclick="copyDork(this, 'site:example.com filetype:sql')">📋</button>
+  </div>
+  <code class="dork-query">site:example.com filetype:sql</code>
+  <p class="dork-desc">SQL</p>
+  <div class="engine-links">
+    <a href="https://www.google.com/search?q=site%3Aexample.com+filetype%3Asql&num=100&filter=0&safe=off" target="_blank" class="engine-btn engine-google">🔍 Google</a>
+<a href="https://www.bing.com/search?q=site%3Aexample.com+filetype%3Asql&count=50&safesearch=Off&mkt=fr-FR" target="_blank" class="engine-btn engine-bing">🔷 Bing</a>
+<a href="https://duckduckgo.com/?q=site%3Aexample.com+filetype%3Asql&kl=fr-fr&kp=-2" target="_blank" class="engine-btn engine-duckduckgo">🦆 DuckDuckGo</a>
+<a href="https://www.shodan.io/search?query=site%3Aexample.com+filetype%3Asql" target="_blank" class="engine-btn engine-shodan">📡 Shodan</a>
+  </div>
+  <div class="pagination">Pages : <a href="https://www.google.com/search?q=site%3Aexample.com+filetype%3Asql&num=100&filter=0&safe=off" target="_blank" class="page-link">P1</a><a href="https://www.google.com/search?q=site%3Aexample.com+filetype%3Asql&num=100&filter=0&safe=off&start=100" target="_blank" class="page-link">P2</a><a href="https://www.google.com/search?q=site%3Aexample.com+filetype%3Asql&num=100&filter=0&safe=off&start=200" target="_blank" class="page-link">P3</a></div>
+</div>
+  </div>
+</section>
+<section class="wave-section">
+  <div class="wave-header" style="border-left: 4px solid #FF6B35">
+    <span class="severity-badge" style="background:#FF6B35;color:#000">ÉLEVÉ</span>
+    <span class="wave-label">Vague 2</span>
+    <span class="wave-count">1 dork(s)</span>
+  </div>
+  <div class="dork-grid">
+    
+<div class="dork-card" id="dork-1">
+  <div class="dork-header">
+    <span class="dork-num">#1</span>
+    <span class="dork-category"></span>
+    <button class="copy-btn" onclick="copyDork(this, 'site:example.com filetype:env')">📋</button>
+  </div>
+  <code class="dork-query">site:example.com filetype:env</code>
+  <p class="dork-desc">Env</p>
+  <div class="engine-links">
+    <a href="https://www.google.com/search?q=site%3Aexample.com+filetype%3Aenv&num=100&filter=0&safe=off" target="_blank" class="engine-btn engine-google">🔍 Google</a>
+<a href="https://www.bing.com/search?q=site%3Aexample.com+filetype%3Aenv&count=50&safesearch=Off&mkt=fr-FR" target="_blank" class="engine-btn engine-bing">🔷 Bing</a>
+<a href="https://duckduckgo.com/?q=site%3Aexample.com+filetype%3Aenv&kl=fr-fr&kp=-2" target="_blank" class="engine-btn engine-duckduckgo">🦆 DuckDuckGo</a>
+<a href="https://www.shodan.io/search?query=site%3Aexample.com+filetype%3Aenv" target="_blank" class="engine-btn engine-shodan">📡 Shodan</a>
+  </div>
+  <div class="pagination">Pages : <a href="https://www.google.com/search?q=site%3Aexample.com+filetype%3Aenv&num=100&filter=0&safe=off" target="_blank" class="page-link">P1</a><a href="https://www.google.com/search?q=site%3Aexample.com+filetype%3Aenv&num=100&filter=0&safe=off&start=100" target="_blank" class="page-link">P2</a><a href="https://www.google.com/search?q=site%3Aexample.com+filetype%3Aenv&num=100&filter=0&safe=off&start=200" target="_blank" class="page-link">P3</a></div>
+</div>
+  </div>
+</section>
+<section class="wave-section">
+  <div class="wave-header" style="border-left: 4px solid #FFD700">
+    <span class="severity-badge" style="background:#FFD700;color:#000">MOYEN</span>
+    <span class="wave-label">Vague 3</span>
+    <span class="wave-count">1 dork(s)</span>
+  </div>
+  <div class="dork-grid">
+    
+<div class="dork-card" id="dork-1">
+  <div class="dork-header">
+    <span class="dork-num">#1</span>
+    <span class="dork-category"></span>
+    <button class="copy-btn" onclick="copyDork(this, 'intitle:admin')">📋</button>
+  </div>
+  <code class="dork-query">intitle:admin</code>
+  <p class="dork-desc">Admin</p>
+  <div class="engine-links">
+    <a href="https://www.google.com/search?q=intitle%3Aadmin&num=100&filter=0&safe=off" target="_blank" class="engine-btn engine-google">🔍 Google</a>
+<a href="https://www.bing.com/search?q=intitle%3Aadmin&count=50&safesearch=Off&mkt=fr-FR" target="_blank" class="engine-btn engine-bing">🔷 Bing</a>
+<a href="https://duckduckgo.com/?q=intitle%3Aadmin&kl=fr-fr&kp=-2" target="_blank" class="engine-btn engine-duckduckgo">🦆 DuckDuckGo</a>
+<a href="https://www.shodan.io/search?query=intitle%3Aadmin" target="_blank" class="engine-btn engine-shodan">📡 Shodan</a>
+  </div>
+  <div class="pagination">Pages : <a href="https://www.google.com/search?q=intitle%3Aadmin&num=100&filter=0&safe=off" target="_blank" class="page-link">P1</a><a href="https://www.google.com/search?q=intitle%3Aadmin&num=100&filter=0&safe=off&start=100" target="_blank" class="page-link">P2</a><a href="https://www.google.com/search?q=intitle%3Aadmin&num=100&filter=0&safe=off&start=200" target="_blank" class="page-link">P3</a></div>
+</div>
+  </div>
+</section>
+</main>
+
+<div class="copy-toast" id="toast">Copié !</div>
+
+<footer>
+  Rapport généré par Dorking Tool — Usage réservé aux audits de sécurité autorisés.
+  Les liens ouvrent les moteurs dans votre navigateur avec les paramètres d'audit optimaux
+  (num=100, filter=0, safe=off).
+</footer>
+
+<script>
+function copyDork(btn, dork) {
+  navigator.clipboard.writeText(dork).then(() => {
+    const toast = document.getElementById('toast');
+    toast.style.display = 'block';
+    setTimeout(() => toast.style.display = 'none', 1500);
+  });
+}
+</script>
+</body>
+</html>

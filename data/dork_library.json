@@ -1,0 +1,347 @@
+{
+  "categories": {
+    "Fichiers Sensibles": [
+      {
+        "name": "Fichiers de configuration exposés",
+        "dork": "filetype:env OR filetype:config \"DB_PASSWORD\" OR \"API_KEY\"",
+        "description": "Trouve des fichiers .env ou config contenant des credentials",
+        "severity": "CRITIQUE",
+        "tags": ["credentials", "config", "database"]
+      },
+      {
+        "name": "Fichiers SQL exposés",
+        "dork": "filetype:sql \"INSERT INTO\" \"users\" \"password\"",
+        "description": "Bases de données SQL avec tables utilisateurs",
+        "severity": "CRITIQUE",
+        "tags": ["database", "sql", "credentials"]
+      },
+      {
+        "name": "Logs serveur Apache/Nginx",
+        "dork": "filetype:log inurl:/logs/ \"access.log\" OR \"error.log\"",
+        "description": "Fichiers de logs accessibles publiquement",
+        "severity": "ÉLEVÉ",
+        "tags": ["logs", "server", "info-disclosure"]
+      },
+      {
+        "name": "Clés privées SSH/SSL",
+        "dork": "filetype:pem OR filetype:key \"BEGIN RSA PRIVATE KEY\" OR \"BEGIN OPENSSH PRIVATE KEY\"",
+        "description": "Clés privées exposées publiquement",
+        "severity": "CRITIQUE",
+        "tags": ["ssh", "ssl", "private-key", "crypto"]
+      },
+      {
+        "name": "Fichiers WordPress config",
+        "dork": "filetype:php inurl:wp-config \"DB_PASSWORD\" -github",
+        "description": "Fichiers de configuration WordPress avec credentials DB",
+        "severity": "CRITIQUE",
+        "tags": ["wordpress", "cms", "database"]
+      },
+      {
+        "name": "Fichiers backup exposés",
+        "dork": "filetype:bak OR filetype:backup inurl:backup \"password\" OR \"passwd\"",
+        "description": "Fichiers de sauvegarde accessibles",
+        "severity": "ÉLEVÉ",
+        "tags": ["backup", "credentials"]
+      },
+      {
+        "name": "Fichiers .htpasswd",
+        "dork": "filetype:htpasswd OR inurl:\".htpasswd\" \"htpasswd\"",
+        "description": "Fichiers d'authentification Apache exposés",
+        "severity": "CRITIQUE",
+        "tags": ["apache", "auth", "credentials"]
+      }
+    ],
+    "Panneaux d'Administration": [
+      {
+        "name": "phpMyAdmin exposé",
+        "dork": "inurl:phpmyadmin/index.php intitle:\"phpMyAdmin\"",
+        "description": "Interfaces phpMyAdmin accessibles publiquement",
+        "severity": "ÉLEVÉ",
+        "tags": ["phpmyadmin", "database", "admin"]
+      },
+      {
+        "name": "Panneau admin WordPress",
+        "dork": "inurl:/wp-admin/admin-ajax.php intitle:\"WordPress\"",
+        "description": "Installations WordPress avec admin exposé",
+        "severity": "MOYEN",
+        "tags": ["wordpress", "admin", "cms"]
+      },
+      {
+        "name": "Jenkins sans authentification",
+        "dork": "intitle:\"Dashboard [Jenkins]\" inurl:8080 -login",
+        "description": "Serveurs Jenkins accessibles sans auth",
+        "severity": "CRITIQUE",
+        "tags": ["jenkins", "ci-cd", "devops"]
+      },
+      {
+        "name": "Grafana exposé",
+        "dork": "intitle:\"Grafana\" inurl:3000 \"Welcome to Grafana\"",
+        "description": "Tableaux de bord Grafana accessibles",
+        "severity": "ÉLEVÉ",
+        "tags": ["grafana", "monitoring", "dashboard"]
+      },
+      {
+        "name": "Elasticsearch sans auth",
+        "dork": "intitle:\"Kibana\" inurl:5601 \"Discover\"",
+        "description": "Interfaces Kibana/Elasticsearch accessibles",
+        "severity": "CRITIQUE",
+        "tags": ["elasticsearch", "kibana", "database"]
+      },
+      {
+        "name": "Docker Registry exposé",
+        "dork": "intitle:\"Docker Registry\" inurl:5000/v2",
+        "description": "Registres Docker accessibles sans authentification",
+        "severity": "ÉLEVÉ",
+        "tags": ["docker", "registry", "devops"]
+      }
+    ],
+    "Appareils & IoT": [
+      {
+        "name": "Caméras IP Webcam",
+        "dork": "inurl:\"/view/view.shtml\" OR inurl:\"/webcam.html\" intitle:\"webcam\"",
+        "description": "Flux de caméras IP non sécurisées",
+        "severity": "ÉLEVÉ",
+        "tags": ["iot", "camera", "surveillance"]
+      },
+      {
+        "name": "Routeurs avec interface d'admin",
+        "dork": "intitle:\"router\" OR intitle:\"gateway\" inurl:\"setup.cgi\" OR inurl:\"home.asp\"",
+        "description": "Interfaces de gestion de routeurs exposées",
+        "severity": "ÉLEVÉ",
+        "tags": ["iot", "router", "network"]
+      },
+      {
+        "name": "Imprimantes réseau",
+        "dork": "intitle:\"HP Printer\" OR intitle:\"Printer Status\" inurl:\"hp/device\"",
+        "description": "Imprimantes réseau avec interfaces web exposées",
+        "severity": "MOYEN",
+        "tags": ["iot", "printer", "network"]
+      }
+    ],
+    "Informations d'Entreprise": [
+      {
+        "name": "Documents internes sur Google Drive",
+        "dork": "site:drive.google.com \"confidentiel\" OR \"internal use only\" -example",
+        "description": "Documents Google Drive potentiellement mal configurés",
+        "severity": "ÉLEVÉ",
+        "tags": ["google-drive", "documents", "leak"]
+      },
+      {
+        "name": "Plans et rapports PDF sensibles",
+        "dork": "filetype:pdf \"internal\" OR \"confidential\" OR \"restricted\" site:{target}",
+        "description": "Documents PDF internes publiés accidentellement",
+        "severity": "MOYEN",
+        "tags": ["pdf", "documents", "confidential"]
+      },
+      {
+        "name": "Emails dans des fichiers texte",
+        "dork": "filetype:txt \"@{target}\" \"password\" OR \"passwd\"",
+        "description": "Adresses email avec credentials dans des fichiers txt",
+        "severity": "ÉLEVÉ",
+        "tags": ["email", "credentials", "txt"]
+      },
+      {
+        "name": "Code source exposé sur GitHub",
+        "dork": "site:github.com \"{target}\" \"api_key\" OR \"secret_key\" OR \"password\"",
+        "description": "Code source avec secrets sur GitHub",
+        "severity": "CRITIQUE",
+        "tags": ["github", "code", "secrets", "api-key"]
+      },
+      {
+        "name": "Trello boards publics",
+        "dork": "site:trello.com \"{target}\" \"password\" OR \"credentials\" OR \"token\"",
+        "description": "Boards Trello publics avec informations sensibles",
+        "severity": "ÉLEVÉ",
+        "tags": ["trello", "project-management", "secrets"]
+      }
+    ],
+    "Vulnérabilités Spécifiques": [
+      {
+        "name": "Directory Listing activé",
+        "dork": "intitle:\"Index of /\" inurl:{target}",
+        "description": "Serveurs avec listing de répertoires activé",
+        "severity": "MOYEN",
+        "tags": ["directory-listing", "info-disclosure"]
+      },
+      {
+        "name": "Pages d'erreur SQL",
+        "dork": "site:{target} \"You have an error in your SQL syntax\" OR \"Warning: mysql_\"",
+        "description": "Erreurs SQL révélant la technologie et les requêtes",
+        "severity": "ÉLEVÉ",
+        "tags": ["sql-injection", "error-disclosure", "database"]
+      },
+      {
+        "name": "Fichiers de debug PHP",
+        "dork": "site:{target} filetype:php intitle:\"phpinfo()\" \"PHP Version\"",
+        "description": "Pages phpinfo() exposées révélant la configuration serveur",
+        "severity": "ÉLEVÉ",
+        "tags": ["php", "debug", "info-disclosure"]
+      },
+      {
+        "name": "Serveurs FTP anonymes",
+        "dork": "intitle:\"FTP root\" inurl:ftp \"230 Login successful\"",
+        "description": "Serveurs FTP autorisant les connexions anonymes",
+        "severity": "ÉLEVÉ",
+        "tags": ["ftp", "anonymous", "file-access"]
+      }
+    ],
+    "OSINT Personnel": [
+      {
+        "name": "Profils LinkedIn par entreprise",
+        "dork": "site:linkedin.com/in \"{target}\" \"engineer\" OR \"developer\" OR \"security\"",
+        "description": "Employés d'une organisation sur LinkedIn",
+        "severity": "INFO",
+        "tags": ["linkedin", "osint", "employees"]
+      },
+      {
+        "name": "Profils GitHub d'une org",
+        "dork": "site:github.com/{target} followers",
+        "description": "Développeurs liés à une organisation sur GitHub",
+        "severity": "INFO",
+        "tags": ["github", "osint", "developers"]
+      },
+      {
+        "name": "Paste sites avec emails",
+        "dork": "site:pastebin.com \"{target}\" \"@\" email",
+        "description": "Emails d'une organisation sur Pastebin",
+        "severity": "ÉLEVÉ",
+        "tags": ["pastebin", "email", "leak"]
+      }
+    ]
+  },
+  "operators": {
+    "site": {
+      "syntax": "site:domain.com",
+      "description": "Limite la recherche à un domaine spécifique",
+      "example": "site:example.com confidential",
+      "category": "Ciblage"
+    },
+    "filetype": {
+      "syntax": "filetype:ext",
+      "description": "Filtre par extension de fichier",
+      "example": "filetype:sql password",
+      "category": "Fichiers"
+    },
+    "intitle": {
+      "syntax": "intitle:\"texte\"",
+      "description": "Cherche dans le titre de la page",
+      "example": "intitle:\"admin panel\"",
+      "category": "Page"
+    },
+    "inurl": {
+      "syntax": "inurl:chemin",
+      "description": "Cherche dans l'URL de la page",
+      "example": "inurl:admin login",
+      "category": "URL"
+    },
+    "intext": {
+      "syntax": "intext:\"texte\"",
+      "description": "Cherche dans le corps du texte",
+      "example": "intext:\"password\" site:example.com",
+      "category": "Contenu"
+    },
+    "cache": {
+      "syntax": "cache:url",
+      "description": "Affiche la version en cache Google d'une page",
+      "example": "cache:example.com/page",
+      "category": "Archive"
+    },
+    "around": {
+      "syntax": "mot1 AROUND(N) mot2",
+      "description": "Les deux mots doivent être à maximum N mots l'un de l'autre",
+      "example": "vulnerability AROUND(3) CVE-2024",
+      "category": "Proximité"
+    },
+    "OR": {
+      "syntax": "terme1 OR terme2",
+      "description": "Recherche l'un ou l'autre terme",
+      "example": "filetype:env OR filetype:config",
+      "category": "Logique"
+    },
+    "AND": {
+      "syntax": "terme1 AND terme2",
+      "description": "Les deux termes doivent être présents (comportement par défaut)",
+      "example": "admin AND password",
+      "category": "Logique"
+    },
+    "NOT": {
+      "syntax": "-terme",
+      "description": "Exclut un terme des résultats",
+      "example": "site:gov -site:usa.gov",
+      "category": "Logique"
+    },
+    "quotes": {
+      "syntax": "\"phrase exacte\"",
+      "description": "Recherche une phrase exacte",
+      "example": "\"index of\" \"/backup\"",
+      "category": "Précision"
+    },
+    "ext": {
+      "syntax": "ext:extension",
+      "description": "Alias de filetype:",
+      "example": "ext:pdf confidential",
+      "category": "Fichiers"
+    },
+    "allintitle": {
+      "syntax": "allintitle:mot1 mot2",
+      "description": "Tous les mots doivent être dans le titre",
+      "example": "allintitle:admin login panel",
+      "category": "Page"
+    },
+    "allinurl": {
+      "syntax": "allinurl:mot1 mot2",
+      "description": "Tous les mots doivent être dans l'URL",
+      "example": "allinurl:wp-admin login",
+      "category": "URL"
+    },
+    "related": {
+      "syntax": "related:url",
+      "description": "Sites similaires à l'URL donnée",
+      "example": "related:example.com",
+      "category": "Découverte"
+    },
+    "info": {
+      "syntax": "info:url",
+      "description": "Informations sur une page spécifique",
+      "example": "info:example.com",
+      "category": "Info"
+    }
+  },
+  "stacks": {
+    "WordPress": [
+      "site:{target} filetype:php inurl:wp-config",
+      "site:{target} inurl:/wp-content/uploads/ filetype:sql",
+      "site:{target} intitle:\"WordPress\" inurl:/wp-login.php",
+      "site:{target} inurl:/wp-json/wp/v2/users",
+      "site:{target} filetype:log inurl:debug.log"
+    ],
+    "Apache/PHP": [
+      "site:{target} intitle:\"phpinfo()\" PHP",
+      "site:{target} inurl:\".php\" filetype:php \"mysql_connect\"",
+      "site:{target} intitle:\"Index of\" inurl:includes",
+      "site:{target} filetype:inc inurl:config",
+      "site:{target} \"Warning: include\" path"
+    ],
+    "Node.js/Express": [
+      "site:{target} filetype:env \"NODE_ENV\" OR \"PORT\"",
+      "site:{target} \"Error: Cannot GET\" OR \"TypeError\"",
+      "site:{target} inurl:/.git/config",
+      "site:{target} filetype:json \"dependencies\" \"express\"",
+      "site:github.com {target} \"process.env\" \"secret\""
+    ],
+    "Django/Python": [
+      "site:{target} \"Django\" \"Traceback\" \"settings\"",
+      "site:{target} \"DisallowedHost\" OR \"ALLOWED_HOSTS\"",
+      "site:{target} filetype:py \"SECRET_KEY\" OR \"DATABASES\"",
+      "site:{target} intitle:\"Django\" \"DEBUG = True\"",
+      "site:github.com {target} \"settings.py\" \"SECRET_KEY\""
+    ],
+    "AWS/Cloud": [
+      "site:{target} \"aws_access_key_id\" OR \"aws_secret_access_key\"",
+      "site:{target} filetype:yaml \"s3:\" OR \"dynamodb:\"",
+      "site:s3.amazonaws.com {target}",
+      "site:{target} \"AWSAccessKeyId\" filetype:properties",
+      "site:github.com {target} \"AKIA\" aws"
+    ]
+  }
+}
